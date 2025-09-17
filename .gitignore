@@ -1,0 +1,72 @@
+# CakePHP
+/tmp/*
+!/tmp/.gitkeep
+/logs/*
+!/logs/.gitkeep
+/vendor/
+/config/app_local.php
+/config/.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database
+*.sqlite
+*.db
+
+# Cache
+/tmp/cache/*
+!/tmp/cache/.gitkeep
+
+# Sessions
+/tmp/sessions/*
+!/tmp/sessions/.gitkeep
+
+# Tests
+/tmp/tests/*
+!/tmp/tests/.gitkeep
+
+# Debug Kit
+/tmp/debug_kit.sqlite
+
+# Composer
+composer.phar
+composer.lock
+
+# Environment files
+.env
+.env.local
+.env.production
+
+# Logs
+*.log
+logs/*.log
+
+# Backup files
+*.bak
+*.backup
+*.sql
+*.dump
+
+# Docker
+docker-compose.override.yml
+.dockerignore
+
+# Node modules (if any)
+node_modules/
+
+# Build artifacts
+/build/
+/dist/
+
+# Temporary files
+*.tmp
+*.temp

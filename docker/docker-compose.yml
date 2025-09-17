@@ -1,0 +1,30 @@
+version: "3.8"
+
+services: 
+  scorecardtrakker_backend: 
+    container_name: scorecardtrakker_backend
+    restart: always
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: scorecardtrakker_backend:latest
+    environment: 
+      - APACHE_RUN_USER=www-data
+      - APACHE_RUN_GROUP=www-data
+    ports:
+      - "97:80"
+      - "456:443"
+    volumes:
+      - ../:/var/www/html
+    command: >
+      bash -c "composer install --optimize-autoloader &&
+               mkdir -p /var/www/html/logs /var/www/html/tmp &&
+               chown -R www-data:www-data /var/www/html/logs /var/www/html/tmp &&
+               apache2-foreground"
+    networks:
+      - scorecardtrakker_network
+
+networks:
+  scorecardtrakker_network:
+    name: scorecardtrakker_network
+    driver: bridge 
