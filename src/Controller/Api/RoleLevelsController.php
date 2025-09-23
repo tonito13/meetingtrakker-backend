@@ -39,6 +39,8 @@ class RoleLevelsController extends ApiController
                     'message' => 'Unauthorized access',
                 ]));
         }
+        debug($authResult->getData());
+        die('test data');
 
         $company_id = $authResult->getData()->company_id;
         try {

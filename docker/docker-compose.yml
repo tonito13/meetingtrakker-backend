@@ -12,8 +12,8 @@ services:
       - APACHE_RUN_USER=www-data
       - APACHE_RUN_GROUP=www-data
     ports:
-      - "97:80"
-      - "456:443"
+      - "5004:80"
+      - "458:443"
     volumes:
       - ../:/var/www/html
     command: >
@@ -22,9 +22,8 @@ services:
                chown -R www-data:www-data /var/www/html/logs /var/www/html/tmp &&
                apache2-foreground"
     networks:
-      - scorecardtrakker_network
+      - workmatica_network
 
 networks:
-  scorecardtrakker_network:
-    name: scorecardtrakker_network
-    driver: bridge 
+  workmatica_network:
+    external: true 

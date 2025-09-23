@@ -28,9 +28,13 @@ function setupDataSource($host, $username, $password, $database) {
 
 $dataSources = [];
 
-$dataSources['default'] = setupDataSource('scorecardtrakker_postgres_database', 'scorecardtrakker_user', 'securepassword', 'scorecardtrakker');
-$dataSources['test'] = setupDataSource('scorecardtrakker_postgres_database', 'scorecardtrakker_user', 'securepassword', 'scorecardtrakker');
-$dataSources['client_200001'] = setupDataSource('scorecardtrakker_postgres_database', 'scorecardtrakker_user', 'securepassword', '200001');
+// $dataSources['default'] = setupDataSource('scorecardtrakker_postgres_database', 'scorecardtrakker_user', 'securepassword', 'scorecardtrakker');
+// $dataSources['test'] = setupDataSource('scorecardtrakker_postgres_database', 'scorecardtrakker_user', 'securepassword', 'scorecardtrakker');
+// $dataSources['client_200001'] = setupDataSource('scorecardtrakker_postgres_database', 'scorecardtrakker_user', 'securepassword', '200001');
+
+$dataSources['default'] = setupDataSource('postgres_workmatica_template', 'workmatica_user', 'securepassword', 'scorecardtrakker');
+$dataSources['test'] = setupDataSource('postgres_workmatica_template', 'workmatica_user', 'securepassword', 'scorecardtrakker_test');
+$dataSources['client_200002'] = setupDataSource('postgres_workmatica_template', 'workmatica_user', 'securepassword', '200002');
 
 // Return only the datasources array, not nested
 return $dataSources;

@@ -67,7 +67,7 @@ class UsersController extends ApiController
     public function login()
     {
         $data = $this->request->getData();
-
+        
         // Validate input
         if (empty($data['username']) || empty($data['password'])) {
             return $this->response->withStatus(400)
@@ -83,14 +83,17 @@ class UsersController extends ApiController
             ->where(['username' => $data['username']])
             ->first();
 
+    
         // Check if user exists and password is correct
         if (!$user || !password_verify($data['password'], $user->password)) {
             return $this->response->withStatus(401)
                 ->withType('application/json')
                 ->withStringBody(json_encode(['message' => 'Invalid username or password']));
         }
-
+       
         $token = $this->generateToken($user);
+       
+
 
         return $this->response->withType('application/json')->withStringBody(json_encode([
             'token' => $token,
@@ -100,7 +103,7 @@ class UsersController extends ApiController
                 'first_name' => $user->first_name,
                 'last_name' => $user->last_name,
                 'email' => $user->email_address,
-                'user_role' => $user->system_user_role
+                'system_user_role' => $user->system_user_role
             ],
             'success' => true
         ]));
