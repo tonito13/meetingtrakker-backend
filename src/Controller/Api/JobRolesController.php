@@ -22,7 +22,7 @@ class JobRolesController extends ApiController
 
     public function addJobRole()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['post']);
 
         // Authentication check
@@ -38,7 +38,7 @@ class JobRolesController extends ApiController
         }
 
         $data = $this->request->getData();
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
         $answers = $data['answers'] ?? null;
         $templateId = $data['template_id'] ?? null;
 
@@ -60,6 +60,22 @@ class JobRolesController extends ApiController
                 ->withStringBody(json_encode([
                     'success' => false,
                     'message' => 'Missing or invalid template_id.',
+                ]));
+        }
+
+        // Check if template exists
+        $JobRoleTemplatesTable = $this->getTable('JobRoleTemplates', $companyId);
+        $template = $JobRoleTemplatesTable->find()
+            ->where(['id' => $templateId, 'company_id' => $companyId, 'deleted' => 0])
+            ->first();
+        
+        if (!$template) {
+            return $this->response
+                ->withStatus(400)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Template not found.',
                 ]));
         }
 
@@ -141,7 +157,7 @@ class JobRolesController extends ApiController
                 ]));
         }
 
-        $company_id = $authResult->getData()->company_id;
+        $company_id = $this->getCompanyId($authResult);
         try {
             $JobRoleTemplatesTable = $this->getTable('JobRoleTemplates', $company_id);
 
@@ -161,7 +177,13 @@ class JobRolesController extends ApiController
             }
 
             // Process the structure to extract Role Code, Official Designation, and Level
-            $structure = json_decode(json_encode($template->structure), true); // Convert to array
+            $structure = $template->structure;
+            if (is_string($structure)) {
+                $structure = json_decode($structure, true);
+            }
+            if (!is_array($structure)) {
+                $structure = [];
+            }
             $headers = [];
 
             // Iterate through structure groups to find the fields
@@ -227,7 +249,9 @@ class JobRolesController extends ApiController
 
     public function getJobRolesData()
     {
-        Configure::write('debug', 1);
+        \Cake\Log\Log::debug('🔍 DEBUG: getJobRolesData method called');
+        
+        Configure::write('debug', true);
         $this->request->allowMethod(['get']);
 
         $authResult = $this->Authentication->getResult();
@@ -241,7 +265,7 @@ class JobRolesController extends ApiController
                 ]));
         }
 
-        $company_id = $authResult->getData()->company_id;
+        $company_id = $this->getCompanyId($authResult);
 
         // Get pagination, search, and sorting parameters
         $page = (int)($this->request->getQuery('page') ?? 1);
@@ -357,17 +381,19 @@ class JobRolesController extends ApiController
                             if (isset($fieldMapping[$fieldLabel])) {
                                 $dataKey = $fieldMapping[$fieldLabel]['dataKey'];
 
-                                foreach ($answers as $groupAnswers) {
-                                    if (isset($groupAnswers[$fieldId])) {
-                                        $answerValue = $groupAnswers[$fieldId];
-                                        $result[$dataKey] = $answerValue;
+                                if (is_array($answers)) {
+                                    foreach ($answers as $groupAnswers) {
+                                        if (isset($groupAnswers[$fieldId])) {
+                                            $answerValue = $groupAnswers[$fieldId];
+                                            $result[$dataKey] = $answerValue;
 
-                                        // Capture level for rank mapping
-                                        if ($dataKey === 'level') {
-                                            $levelValue = $answerValue;
+                                            // Capture level for rank mapping
+                                            if ($dataKey === 'level') {
+                                                $levelValue = $answerValue;
+                                            }
+
+                                            break;
                                         }
-
-                                        break;
                                     }
                                 }
                             }
@@ -467,7 +493,7 @@ class JobRolesController extends ApiController
                 ]));
         }
 
-        $company_id = $authResult->getData()->company_id;
+        $company_id = $this->getCompanyId($authResult);
         $data = $this->request->getData();
         $job_role_unique_id = $data['job_role_unique_id'] ?? null;
 
@@ -534,6 +560,7 @@ class JobRolesController extends ApiController
 
             if (empty($get_job_role_detail)) {
                 return $this->response
+                    ->withStatus(404)
                     ->withType('application/json')
                     ->withStringBody(json_encode([
                         'success' => false,
@@ -624,7 +651,7 @@ class JobRolesController extends ApiController
 
     public function editJobRole()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['post']);
 
         // Authentication check
@@ -640,7 +667,7 @@ class JobRolesController extends ApiController
         }
 
         $data = $this->request->getData();
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
         $answers = $data['answers'] ?? null;
         $templateId = $data['template_id'] ?? null;
         $job_role_unique_id = $data['job_role_unique_id'] ?? null;
@@ -687,6 +714,16 @@ class JobRolesController extends ApiController
                 'template_id' => $templateId,
             ])
             ->first();
+
+        if (!$existing) {
+            return $this->response
+                ->withStatus(404)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Job role not found',
+                ]));
+        }
 
         try {
             // Store old answers BEFORE any modifications for audit logging
@@ -799,7 +836,7 @@ class JobRolesController extends ApiController
 
     public function deleteJobRole()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['post']);
 
         // Authentication check
@@ -815,7 +852,7 @@ class JobRolesController extends ApiController
         }
 
         $data = $this->request->getData();
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
         $job_role_unique_id = $data['job_role_unique_id'] ?? null;
 
         $JobRoleTemplateAnswersTable = $this->getTable('JobRoleTemplateAnswers', $companyId);
@@ -868,7 +905,14 @@ class JobRolesController extends ApiController
 
             // Log audit action
             $userData = AuditHelper::extractUserData($authResult);
-            $jobRoleName = AuditHelper::extractJobRoleName($existing->answers ?? []);
+            $jobRoleAnswers = $existing->answers;
+            if (is_string($jobRoleAnswers)) {
+                $jobRoleAnswers = json_decode($jobRoleAnswers, true);
+            }
+            if (!is_array($jobRoleAnswers)) {
+                $jobRoleAnswers = [];
+            }
+            $jobRoleName = AuditHelper::extractJobRoleName($jobRoleAnswers);
             
             Log::debug('🔍 DEBUG: deleteJobRole - Audit logging data', [
                 'job_role_unique_id' => $job_role_unique_id,
@@ -912,7 +956,7 @@ class JobRolesController extends ApiController
 
     public function getJobRoleLabel()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['get']);
 
         $authResult = $this->Authentication->getResult();
@@ -926,7 +970,7 @@ class JobRolesController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
 
         try {
             // Get tenant-specific table
@@ -947,6 +991,12 @@ class JobRolesController extends ApiController
 
             // Extract the customize_field_label for the "Role Code" field
             $structure = $template->structure;
+            if (is_string($structure)) {
+                $structure = json_decode($structure, true);
+            }
+            if (!is_array($structure)) {
+                $structure = [];
+            }
             $officialDesignationLabel = 'Official Designation'; // Default label
 
             foreach ($structure as $group) {
@@ -998,7 +1048,7 @@ class JobRolesController extends ApiController
                 ]));
         }
 
-        $company_id = $authResult->getData()->company_id;
+        $company_id = $this->getCompanyId($authResult);
         try {
             $JobRoleTemplatesTable = $this->getTable('JobRoleTemplates', $company_id);
 
@@ -1057,7 +1107,14 @@ class JobRolesController extends ApiController
                 }
 
                 // Map answers to field labels based on structure
-                foreach ($role->structure as $group) {
+                $structure = $role->structure;
+                if (is_string($structure)) {
+                    $structure = json_decode($structure, true);
+                }
+                if (!is_array($structure)) {
+                    $structure = [];
+                }
+                foreach ($structure as $group) {
                     foreach ($group['fields'] as $field) {
                         $fieldId = $field['id'];
                         $fieldLabel = $field['label'];
@@ -1069,10 +1126,12 @@ class JobRolesController extends ApiController
                         if (isset($fieldMapping[$fieldLabel])) {
                             $dataKey = $fieldMapping[$fieldLabel]['dataKey'];
                             // Find the answer for this field
-                            foreach ($answers as $groupAnswers) {
-                                if (isset($groupAnswers[$fieldId])) {
-                                    $result[$dataKey] = $groupAnswers[$fieldId];
-                                    break;
+                            if (is_array($answers)) {
+                                foreach ($answers as $groupAnswers) {
+                                    if (isset($groupAnswers[$fieldId])) {
+                                        $result[$dataKey] = $groupAnswers[$fieldId];
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -1185,5 +1244,19 @@ class JobRolesController extends ApiController
         }
         
         return $fieldMapping;
+    }
+
+    private function getCompanyId($authResult)
+    {
+        $authData = $authResult->getData();
+
+        // Handle both ArrayObject and stdClass
+        if ($authData instanceof \ArrayObject || is_array($authData)) {
+            return $authData['company_id'] ?? null;
+        } elseif (is_object($authData)) {
+            return $authData->company_id ?? null;
+        }
+
+        return null;
     }
 }

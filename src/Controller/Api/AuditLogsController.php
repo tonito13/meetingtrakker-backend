@@ -38,7 +38,7 @@ class AuditLogsController extends ApiController
                 ]));
         }
 
-        $companyId = (string)$authResult->getData()->company_id;
+        $companyId = (string)$this->getCompanyId($authResult);
         $this->auditService = new AuditService($companyId);
 
         try {
@@ -112,7 +112,7 @@ class AuditLogsController extends ApiController
                 ]));
         }
 
-        $companyId = (string)$authResult->getData()->company_id;
+        $companyId = (string)$this->getCompanyId($authResult);
         $auditLogId = $this->request->getQuery('audit_log_id');
 
         if (empty($auditLogId)) {
@@ -127,18 +127,11 @@ class AuditLogsController extends ApiController
 
         try {
             $this->auditService = new AuditService($companyId);
-            $auditLogsTable = $this->auditService->getTable('AuditLogs');
-            $auditLogDetailsTable = $this->auditService->getTable('AuditLogDetails');
+            
+            // Get audit log and details using the service
+            $result = $this->auditService->getAuditLogWithDetails($auditLogId, $companyId);
 
-            // Get audit log
-            $auditLog = $auditLogsTable->find()
-                ->where([
-                    'id' => $auditLogId,
-                    'company_id' => $companyId
-                ])
-                ->first();
-
-            if (!$auditLog) {
+            if (!$result) {
                 return $this->response
                     ->withStatus(404)
                     ->withType('application/json')
@@ -148,20 +141,11 @@ class AuditLogsController extends ApiController
                     ]));
             }
 
-            // Get details
-            $details = $auditLogDetailsTable->find()
-                ->where(['audit_log_id' => $auditLogId])
-                ->orderAsc('field_name')
-                ->toArray();
-
             return $this->response
                 ->withType('application/json')
                 ->withStringBody(json_encode([
                     'success' => true,
-                    'data' => [
-                        'audit_log' => $auditLog,
-                        'details' => $details
-                    ]
+                    'data' => $result
                 ]));
 
         } catch (Exception $e) {
@@ -200,7 +184,7 @@ class AuditLogsController extends ApiController
                 ]));
         }
 
-        $companyId = (string)$authResult->getData()->company_id;
+        $companyId = (string)$this->getCompanyId($authResult);
         $this->auditService = new AuditService($companyId);
 
         try {
@@ -260,7 +244,7 @@ class AuditLogsController extends ApiController
                 ]));
         }
 
-        $companyId = (string)$authResult->getData()->company_id;
+        $companyId = (string)$this->getCompanyId($authResult);
         $this->auditService = new AuditService($companyId);
 
         try {
@@ -334,51 +318,19 @@ class AuditLogsController extends ApiController
                 ]));
         }
 
-        $companyId = (string)$authResult->getData()->company_id;
+        $companyId = (string)$this->getCompanyId($authResult);
 
         try {
             $this->auditService = new AuditService($companyId);
-            $auditLogsTable = $this->auditService->getTable('AuditLogs');
-
-            // Get unique values for filters
-            $actions = $auditLogsTable->find()
-                ->select(['action'])
-                ->where(['company_id' => $companyId])
-                ->group(['action'])
-                ->orderAsc('action')
-                ->toArray();
-
-            $entityTypes = $auditLogsTable->find()
-                ->select(['entity_type'])
-                ->where(['company_id' => $companyId])
-                ->group(['entity_type'])
-                ->orderAsc('entity_type')
-                ->toArray();
-
-            $statuses = $auditLogsTable->find()
-                ->select(['status'])
-                ->where(['company_id' => $companyId])
-                ->group(['status'])
-                ->orderAsc('status')
-                ->toArray();
-
-            $users = $auditLogsTable->find()
-                ->select(['username'])
-                ->where(['company_id' => $companyId])
-                ->group(['username'])
-                ->orderAsc('username')
-                ->toArray();
+            
+            // Get filter options using the service
+            $filterOptions = $this->auditService->getFilterOptions($companyId);
 
             return $this->response
                 ->withType('application/json')
                 ->withStringBody(json_encode([
                     'success' => true,
-                    'data' => [
-                        'actions' => array_column($actions, 'action'),
-                        'entity_types' => array_column($entityTypes, 'entity_type'),
-                        'statuses' => array_column($statuses, 'status'),
-                        'users' => array_column($users, 'username')
-                    ]
+                    'data' => $filterOptions
                 ]));
 
         } catch (Exception $e) {
@@ -395,5 +347,37 @@ class AuditLogsController extends ApiController
                     'message' => 'Error fetching filter options: ' . $e->getMessage(),
                 ]));
         }
+    }
+
+    /**
+     * Helper method to extract company_id from authentication result
+     */
+    private function getCompanyId($authResult)
+    {
+        $data = $authResult->getData();
+        
+        // Handle both ArrayObject and stdClass
+        if (is_object($data)) {
+            if (isset($data->company_id)) {
+                return $data->company_id;
+            }
+            // Convert to array if needed
+            $data = (array) $data;
+        }
+        
+        if (is_array($data) && isset($data['company_id'])) {
+            return $data['company_id'];
+        }
+        
+        // Fallback: try to get from JWT payload
+        if (method_exists($authResult, 'getPayload')) {
+            $payload = $authResult->getPayload();
+            if (isset($payload['company_id'])) {
+                return $payload['company_id'];
+            }
+        }
+        
+        // Default fallback
+        return '200001'; // Default company ID
     }
 }

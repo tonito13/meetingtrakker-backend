@@ -22,8 +22,8 @@ services:
                chown -R www-data:www-data /var/www/html/logs /var/www/html/tmp &&
                apache2-foreground"
     networks:
-      - workmatica_network
+      - scorecardtrakker_network
 
 networks:
-  workmatica_network:
+  scorecardtrakker_network:
     external: true 

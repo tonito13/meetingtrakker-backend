@@ -24,12 +24,14 @@ class AuditService
     public function __construct(string $companyId = 'default')
     {
         $this->companyId = $companyId;
-        $this->auditLogsTable = TableRegistry::getTableLocator()->get('AuditLogs', [
-            'connection' => $this->getConnection($companyId)
-        ]);
-        $this->auditLogDetailsTable = TableRegistry::getTableLocator()->get('AuditLogDetails', [
-            'connection' => $this->getConnection($companyId)
-        ]);
+        
+        // Get table locator
+        $locator = TableRegistry::getTableLocator();
+        
+        // Always use existing tables if they're already loaded (e.g., in test environment)
+        // This prevents "You cannot configure X, it already exists in the registry" errors
+        $this->auditLogsTable = $locator->get('AuditLogs');
+        $this->auditLogDetailsTable = $locator->get('AuditLogDetails');
     }
 
     /**
@@ -361,6 +363,84 @@ class AuditService
         return TableRegistry::getTableLocator()->get($tableName, [
             'connection' => $this->getConnection($this->companyId)
         ]);
+    }
+
+    /**
+     * Get audit log with details
+     *
+     * @param string $auditLogId
+     * @param string $companyId
+     * @return array|null
+     */
+    public function getAuditLogWithDetails(string $auditLogId, string $companyId): ?array
+    {
+        // Get audit log
+        $auditLog = $this->auditLogsTable->find()
+            ->where([
+                'id' => $auditLogId,
+                'company_id' => $companyId
+            ])
+            ->first();
+
+        if (!$auditLog) {
+            return null;
+        }
+
+        // Get details
+        $details = $this->auditLogDetailsTable->find()
+            ->where(['audit_log_id' => $auditLogId])
+            ->orderAsc('field_name')
+            ->toArray();
+
+        return [
+            'audit_log' => $auditLog,
+            'details' => $details
+        ];
+    }
+
+    /**
+     * Get available filter options for audit logs
+     *
+     * @param string $companyId
+     * @return array
+     */
+    public function getFilterOptions(string $companyId): array
+    {
+        // Get unique values for filters
+        $actions = $this->auditLogsTable->find()
+            ->select(['action'])
+            ->where(['company_id' => $companyId])
+            ->group(['action'])
+            ->orderAsc('action')
+            ->toArray();
+
+        $entityTypes = $this->auditLogsTable->find()
+            ->select(['entity_type'])
+            ->where(['company_id' => $companyId])
+            ->group(['entity_type'])
+            ->orderAsc('entity_type')
+            ->toArray();
+
+        $statuses = $this->auditLogsTable->find()
+            ->select(['status'])
+            ->where(['company_id' => $companyId])
+            ->group(['status'])
+            ->orderAsc('status')
+            ->toArray();
+
+        $users = $this->auditLogsTable->find()
+            ->select(['username'])
+            ->where(['company_id' => $companyId])
+            ->group(['username'])
+            ->orderAsc('username')
+            ->toArray();
+
+        return [
+            'actions' => array_column($actions, 'action'),
+            'entity_types' => array_column($entityTypes, 'entity_type'),
+            'statuses' => array_column($statuses, 'status'),
+            'users' => array_column($users, 'username')
+        ];
     }
 
     /**

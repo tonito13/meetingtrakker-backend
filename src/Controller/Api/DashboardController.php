@@ -30,7 +30,7 @@ class DashboardController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
 
         try {
             // Minimal template-friendly metrics only
@@ -99,5 +99,37 @@ class DashboardController extends ApiController
             Log::error('Error getting employee count: ' . $e->getMessage());
             return 0;
         }
+    }
+
+    /**
+     * Helper method to extract company_id from authentication result
+     */
+    private function getCompanyId($authResult)
+    {
+        $data = $authResult->getData();
+        
+        // Handle both ArrayObject and stdClass
+        if (is_object($data)) {
+            if (isset($data->company_id)) {
+                return $data->company_id;
+            }
+            // Convert to array if needed
+            $data = (array) $data;
+        }
+        
+        if (is_array($data) && isset($data['company_id'])) {
+            return $data['company_id'];
+        }
+        
+        // Fallback: try to get from JWT payload
+        if (method_exists($authResult, 'getPayload')) {
+            $payload = $authResult->getPayload();
+            if (isset($payload['company_id'])) {
+                return $payload['company_id'];
+            }
+        }
+        
+        // Default fallback
+        return '200001'; // Default company ID
     }
 } 

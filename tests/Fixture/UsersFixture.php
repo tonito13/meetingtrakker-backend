@@ -20,7 +20,7 @@ class UsersFixture extends TestFixture
         $this->records = [
             [
                // 'id' => 1,
-                'company_id' => 1,
+                'company_id' => 200001,
                 'first_name' => 'Test',
                 'middle_name' => 'User',
                 'last_name' => 'Account',
@@ -39,7 +39,7 @@ class UsersFixture extends TestFixture
                 'province' => 'Test Province',
                 'zipcode' => '1234',
                 'username' => 'test',
-                'password' => '$2y$10$k9fsGxzCqKHb60STn.LsvewaYCMgtSVKyNvPYRbbB8wNImkVZXrAK',
+                'password' => '$2y$10$yBuoIsc4UCRH8ADouYCdtObfdu3pMwATLJoh7L/xCEqtTQFvFJcqu',
                 'system_user_role' => 'admin',
                 'system_access_enabled' => 1,
                 'active' => 1,

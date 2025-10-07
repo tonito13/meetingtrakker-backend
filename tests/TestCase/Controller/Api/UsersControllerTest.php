@@ -3,9 +3,9 @@ declare(strict_types=1);
 
 namespace App\Test\TestCase\Controller\Api;
 
-use App\Controller\Api\UsersController;
 use Cake\TestSuite\IntegrationTestTrait;
 use Cake\TestSuite\TestCase;
+use Throwable;
 
 /**
  * App\Controller\Api\UsersController Test Case
@@ -33,8 +33,9 @@ class UsersControllerTest extends TestCase
         ob_start();
         try {
             $callback();
+
             return ob_get_clean();
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             ob_end_clean(); // Clean up buffer on exception
             throw $e;
         }
@@ -65,7 +66,7 @@ class UsersControllerTest extends TestCase
 
             // Optional: kung API returns JSON
             $this->configRequest([
-                'headers' => ['Accept' => 'application/json']
+                'headers' => ['Accept' => 'application/json'],
             ]);
 
             $this->post('/api/users/login', [
@@ -73,21 +74,24 @@ class UsersControllerTest extends TestCase
                 'password' => self::VALID_PASSWORD,
             ]);
         });
-        
+
         // Get response body for assertions
         $body = (string)$this->_response->getBody();
 
         // ---- ASSERTS
+        if ($this->_response->getStatusCode() !== 200) {
+            $this->fail('Expected 200 but got ' . $this->_response->getStatusCode() . '. Response: ' . $body);
+        }
         $this->assertResponseCode(200);
         $this->assertContentType('application/json');
         $this->assertResponseNotEmpty();
-        
+
         // Check for unexpected console output (echo, print, etc.)
         $this->assertEmpty($consoleOutput, 'Login endpoint should not produce console output (echo, print, etc.)');
-        
+
         // Ensure response is valid JSON
         $this->assertJson($body, 'Response should be valid JSON');
-        
+
         // Verify response contains success data
         $response = json_decode($body, true);
         $this->assertNotNull($response, 'Response should be valid JSON');
@@ -99,7 +103,7 @@ class UsersControllerTest extends TestCase
         $this->assertEquals('Test', $response['user']['first_name'], 'First name should match');
         $this->assertEquals('Account', $response['user']['last_name'], 'Last name should match');
         $this->assertEquals('test@example.com', $response['user']['email'], 'Email should match');
-        $this->assertEquals('admin', $response['user']['system_user_role'], 'User role should match');
+        $this->assertEquals('admin', $response['user']['user_role'], 'User role should match');
     }
 
     /**
@@ -115,29 +119,29 @@ class UsersControllerTest extends TestCase
             $this->enableCsrfToken();
             $this->enableSecurityToken();
             $this->configRequest(['headers' => ['Accept' => 'application/json']]);
-            
+
             $this->post('/api/users/login', [
                 'username' => self::INVALID_USERNAME,
                 'password' => self::VALID_PASSWORD,
             ]);
         });
-        
+
         $body = (string)$this->_response->getBody();
-        
+
         // Assertions for error response
         $this->assertResponseCode(401);
         $this->assertContentType('application/json');
-        
+
         // Check for unexpected console output (echo, print, etc.)
         $this->assertEmpty($consoleOutput, 'Login endpoint should not produce console output (echo, print, etc.)');
-        
+
         // Ensure response is valid JSON
         $this->assertJson($body, 'Response should be valid JSON');
-        
+
         $response = json_decode($body, true);
         $this->assertNotNull($response, 'Response should be valid JSON');
         $this->assertEquals('Invalid username or password', $response['message']);
-        
+
         // Ensure response contains critical error fields
         $this->assertArrayHasKey('message', $response, 'Response should have message field');
         $this->assertArrayNotHasKey('token', $response, 'Response should not contain token field');
@@ -160,26 +164,26 @@ class UsersControllerTest extends TestCase
 
             $this->post('/api/users/login', [
                 'username' => self::VALID_USERNAME,
-                'password' => self::INVALID_PASSWORD
+                'password' => self::INVALID_PASSWORD,
             ]);
         });
-        
+
         $body = (string)$this->_response->getBody();
 
         // Assertions for error response
         $this->assertResponseCode(401);
         $this->assertContentType('application/json');
-        
+
         // Check for unexpected console output (echo, print, etc.)
         $this->assertEmpty($consoleOutput, 'Login endpoint should not produce console output (echo, print, etc.)');
-        
+
         // Ensure response is valid JSON
         $this->assertJson($body, 'Response should be valid JSON');
-        
+
         $response = json_decode($body, true);
         $this->assertNotNull($response, 'Response should be valid JSON');
         $this->assertEquals('Invalid username or password', $response['message']);
-        
+
         // Ensure response contains critical error fields
         $this->assertArrayHasKey('message', $response, 'Response should have message field');
         $this->assertArrayNotHasKey('token', $response, 'Response should not contain token field');
@@ -202,26 +206,26 @@ class UsersControllerTest extends TestCase
 
             $this->post('/api/users/login', [
                 'username' => '',
-                'password' => ''
+                'password' => '',
             ]);
         });
-        
+
         $body = (string)$this->_response->getBody();
 
         // Assertions for error response
         $this->assertResponseCode(400);
         $this->assertContentType('application/json');
-        
+
         // Check for unexpected console output (echo, print, etc.)
         $this->assertEmpty($consoleOutput, 'Login endpoint should not produce console output (echo, print, etc.)');
-        
+
         // Ensure response is valid JSON
         $this->assertJson($body, 'Response should be valid JSON');
-        
+
         $response = json_decode($body, true);
         $this->assertNotNull($response, 'Response should be valid JSON');
         $this->assertEquals('Username and password are required', $response['message']);
-        
+
         // Ensure response contains critical error fields
         $this->assertArrayHasKey('message', $response, 'Response should have message field');
         $this->assertArrayNotHasKey('token', $response, 'Response should not contain token field');
@@ -243,26 +247,26 @@ class UsersControllerTest extends TestCase
             $this->configRequest(['headers' => ['Accept' => 'application/json']]);
 
             $this->post('/api/users/login', [
-                'password' => self::VALID_PASSWORD
+                'password' => self::VALID_PASSWORD,
             ]);
         });
-        
+
         $body = (string)$this->_response->getBody();
 
         // Assertions for error response
         $this->assertResponseCode(400);
         $this->assertContentType('application/json');
-        
+
         // Check for unexpected console output (echo, print, etc.)
         $this->assertEmpty($consoleOutput, 'Login endpoint should not produce console output (echo, print, etc.)');
-        
+
         // Ensure response is valid JSON
         $this->assertJson($body, 'Response should be valid JSON');
-        
+
         $response = json_decode($body, true);
         $this->assertNotNull($response, 'Response should be valid JSON');
         $this->assertEquals('Username and password are required', $response['message']);
-        
+
         // Ensure response contains critical error fields
         $this->assertArrayHasKey('message', $response, 'Response should have message field');
         $this->assertArrayNotHasKey('token', $response, 'Response should not contain token field');
@@ -283,26 +287,26 @@ class UsersControllerTest extends TestCase
             $this->configRequest(['headers' => ['Accept' => 'application/json']]);
 
             $this->post('/api/users/login', [
-                'username' => self::VALID_USERNAME
+                'username' => self::VALID_USERNAME,
             ]);
         });
-        
+
         $body = (string)$this->_response->getBody();
 
         // Assertions for error response
         $this->assertResponseCode(400);
         $this->assertContentType('application/json');
-        
+
         // Check for unexpected console output (echo, print, etc.)
         $this->assertEmpty($consoleOutput, 'Login endpoint should not produce console output (echo, print, etc.)');
-        
+
         // Ensure response is valid JSON
         $this->assertJson($body, 'Response should be valid JSON');
-        
+
         $response = json_decode($body, true);
         $this->assertNotNull($response, 'Response should be valid JSON');
         $this->assertEquals('Username and password are required', $response['message']);
-        
+
         // Ensure response contains critical error fields
         $this->assertArrayHasKey('message', $response, 'Response should have message field');
         $this->assertArrayNotHasKey('token', $response, 'Response should not contain token field');
@@ -337,26 +341,26 @@ class UsersControllerTest extends TestCase
 
                 $this->post('/api/users/login', [
                     'username' => $maliciousUsername,
-                    'password' => self::VALID_PASSWORD
+                    'password' => self::VALID_PASSWORD,
                 ]);
             });
 
             // Should return 401 (unauthorized) - not 200 (success)
             $this->assertResponseCode(401, "SQL injection attempt should fail: {$maliciousUsername}");
             $this->assertContentType('application/json');
-            
+
             $body = (string)$this->_response->getBody();
             $this->assertJson($body, 'Response should be valid JSON');
-            
+
             $response = json_decode($body, true);
             $this->assertEquals('Invalid username or password', $response['message']);
-            
+
             // Ensure response contains critical error fields
             $this->assertArrayHasKey('message', $response, 'Response should have message field');
             $this->assertArrayNotHasKey('token', $response, 'Response should not contain token field');
             $this->assertArrayNotHasKey('user', $response, 'Response should not contain user field');
             $this->assertArrayNotHasKey('success', $response, 'Response should not contain success field');
-            
+
             $this->assertEmpty($consoleOutput, "SQL injection attempt should not produce console output: {$maliciousUsername}");
         }
     }
@@ -388,26 +392,26 @@ class UsersControllerTest extends TestCase
 
                 $this->post('/api/users/login', [
                     'username' => $maliciousUsername,
-                    'password' => self::VALID_PASSWORD
+                    'password' => self::VALID_PASSWORD,
                 ]);
             });
 
             // Should return 401 (unauthorized) - not 200 (success)
             $this->assertResponseCode(401, "Advanced SQL injection attempt should fail: {$maliciousUsername}");
             $this->assertContentType('application/json');
-            
+
             $body = (string)$this->_response->getBody();
             $this->assertJson($body, 'Response should be valid JSON');
-            
+
             $response = json_decode($body, true);
             $this->assertEquals('Invalid username or password', $response['message']);
-            
+
             // Ensure response contains critical error fields
             $this->assertArrayHasKey('message', $response, 'Response should have message field');
             $this->assertArrayNotHasKey('token', $response, 'Response should not contain token field');
             $this->assertArrayNotHasKey('user', $response, 'Response should not contain user field');
             $this->assertArrayNotHasKey('success', $response, 'Response should not contain success field');
-            
+
             $this->assertEmpty($consoleOutput, "Advanced SQL injection attempt should not produce console output: {$maliciousUsername}");
         }
     }
@@ -438,26 +442,26 @@ class UsersControllerTest extends TestCase
 
                 $this->post('/api/users/login', [
                     'username' => self::VALID_USERNAME,
-                    'password' => $maliciousPassword
+                    'password' => $maliciousPassword,
                 ]);
             });
 
             // Should return 401 (unauthorized) - not 200 (success)
             $this->assertResponseCode(401, "SQL injection in password should fail: {$maliciousPassword}");
             $this->assertContentType('application/json');
-            
+
             $body = (string)$this->_response->getBody();
             $this->assertJson($body, 'Response should be valid JSON');
-            
+
             $response = json_decode($body, true);
             $this->assertEquals('Invalid username or password', $response['message']);
-            
+
             // Ensure response contains critical error fields
             $this->assertArrayHasKey('message', $response, 'Response should have message field');
             $this->assertArrayNotHasKey('token', $response, 'Response should not contain token field');
             $this->assertArrayNotHasKey('user', $response, 'Response should not contain user field');
             $this->assertArrayNotHasKey('success', $response, 'Response should not contain success field');
-            
+
             $this->assertEmpty($consoleOutput, "SQL injection in password should not produce console output: {$maliciousPassword}");
         }
     }
@@ -477,7 +481,7 @@ class UsersControllerTest extends TestCase
             // Test SQL injection attempts in both fields
             $this->post('/api/users/login', [
                 'username' => "admin' OR '1'='1",
-                'password' => "12345' OR '1'='1"
+                'password' => "12345' OR '1'='1",
             ]);
         });
 
@@ -487,10 +491,10 @@ class UsersControllerTest extends TestCase
 
         $body = (string)$this->_response->getBody();
         $this->assertJson($body, 'Response should be valid JSON');
-        
+
         $response = json_decode($body, true);
         $this->assertEquals('Invalid username or password', $response['message']);
-        
+
         // Ensure response contains critical error fields
         $this->assertArrayHasKey('message', $response, 'Response should have message field');
         $this->assertArrayNotHasKey('token', $response, 'Response should not contain token field');
@@ -529,8 +533,8 @@ class UsersControllerTest extends TestCase
             $this->configRequest([
                 'headers' => [
                     'Accept' => 'application/json',
-                    'Authorization' => 'Bearer ' . $token
-                ]
+                    'Authorization' => 'Bearer ' . $token,
+                ],
             ]);
 
             $this->get('/api/users');
@@ -539,17 +543,17 @@ class UsersControllerTest extends TestCase
         // Assertions for index response
         $this->assertResponseCode(200);
         $this->assertContentType('application/json');
-        
+
         // Check for unexpected console output
         $this->assertEmpty($consoleOutput, 'Index endpoint should not produce console output');
-        
+
         $body = (string)$this->_response->getBody();
         $this->assertJson($body, 'Response should be valid JSON');
-        
+
         $response = json_decode($body, true);
         $this->assertIsArray($response, 'Response should be an array of users');
         $this->assertNotEmpty($response, 'Response should contain users');
-        
+
         // Validate user structure in response
         if (!empty($response)) {
             $firstUser = $response[0];
@@ -574,16 +578,16 @@ class UsersControllerTest extends TestCase
 
         // Should return 401 (unauthorized) - CakePHP authentication middleware throws exception
         $this->assertResponseCode(401);
-        
+
         // Check for unexpected console output
         $this->assertEmpty($consoleOutput, 'Index endpoint should not produce console output');
-        
+
         // Note: CakePHP authentication middleware returns HTML error page for unauthenticated requests
         // This is the correct security behavior - authentication happens at middleware level
         // and prevents unauthorized access to the controller method
         $body = (string)$this->_response->getBody();
         $this->assertNotEmpty($body, 'Response should not be empty');
-        
+
         // The response should contain error information (HTML format from ErrorHandlerMiddleware)
         // Note: Authentication middleware provides consistent error handling regardless of debug mode
         $this->assertStringContainsString('Authentication is required', $body, 'Response should contain authentication error message');
@@ -597,11 +601,11 @@ class UsersControllerTest extends TestCase
     public function testIndexWithWrongHttpMethods(): void
     {
         $wrongMethods = ['POST', 'PUT', 'DELETE', 'PATCH'];
-        
+
         foreach ($wrongMethods as $method) {
             $consoleOutput = $this->captureConsoleOutput(function () use ($method): void {
                 $this->configRequest(['headers' => ['Accept' => 'application/json']]);
-                
+
                 switch ($method) {
                     case 'POST':
                         $this->post('/api/users');
@@ -621,9 +625,9 @@ class UsersControllerTest extends TestCase
             // Should return 405 (Method Not Allowed) or 401 (Unauthorized)
             $this->assertTrue(
                 in_array($this->_response->getStatusCode(), [401, 405]),
-                "Index endpoint should reject {$method} method"
+                "Index endpoint should reject {$method} method",
             );
-            
+
             // Check for unexpected console output
             $this->assertEmpty($consoleOutput, "Index endpoint should not produce console output for {$method} method");
         }
@@ -658,8 +662,8 @@ class UsersControllerTest extends TestCase
             $this->configRequest([
                 'headers' => [
                     'Accept' => 'application/json',
-                    'Authorization' => 'Bearer ' . $token
-                ]
+                    'Authorization' => 'Bearer ' . $token,
+                ],
             ]);
 
             $this->get('/api/users');
@@ -668,10 +672,10 @@ class UsersControllerTest extends TestCase
         $this->assertResponseCode(200);
         $body = (string)$this->_response->getBody();
         $response = json_decode($body, true);
-        
+
         // Validate response structure
         $this->assertIsArray($response, 'Response should be an array');
-        
+
         if (!empty($response)) {
             foreach ($response as $user) {
                 // Check required fields
@@ -681,7 +685,7 @@ class UsersControllerTest extends TestCase
                 $this->assertArrayHasKey('last_name', $user, 'User should have last_name field');
                 $this->assertArrayHasKey('email_address', $user, 'User should have email_address field');
                 $this->assertArrayHasKey('system_user_role', $user, 'User should have system_user_role field');
-                
+
                 // Check data types
                 $this->assertIsInt($user['id'], 'User id should be integer');
                 $this->assertIsString($user['username'], 'Username should be string');
@@ -689,12 +693,12 @@ class UsersControllerTest extends TestCase
                 $this->assertIsString($user['last_name'], 'Last name should be string');
                 $this->assertIsString($user['email_address'], 'Email address should be string');
                 $this->assertIsString($user['system_user_role'], 'System user role should be string');
-                
+
                 // Check that sensitive data is not exposed
                 $this->assertArrayNotHasKey('password', $user, 'Password should not be exposed in response');
             }
         }
-        
+
         $this->assertEmpty($consoleOutput, 'Index endpoint should not produce console output');
     }
 
@@ -713,13 +717,13 @@ class UsersControllerTest extends TestCase
         // Should return 401 (unauthorized) from authentication middleware
         $this->assertResponseCode(401);
         $this->assertContentType('text/html');
-        
+
         // Check for unexpected console output
         $this->assertEmpty($consoleOutput, 'Unauthorized endpoint should not produce console output');
-        
+
         $body = (string)$this->_response->getBody();
         $this->assertNotEmpty($body, 'Response should not be empty');
-        
+
         // Should contain authentication error message from middleware
         $this->assertStringContainsString('Authentication is required to continue', $body, 'Response should contain authentication error message');
     }
@@ -735,20 +739,20 @@ class UsersControllerTest extends TestCase
             // Set the _ext parameter to trigger XML response
             $this->configRequest([
                 'headers' => ['Accept' => 'application/xml'],
-                'params' => ['_ext' => 'xml']
+                'params' => ['_ext' => 'xml'],
             ]);
             $this->get('/api/users/unauthorized');
         });
 
         // Should return 401 (unauthorized)
         $this->assertResponseCode(401);
-        
+
         // Check for unexpected console output
         $this->assertEmpty($consoleOutput, 'Unauthorized endpoint should not produce console output');
-        
+
         $body = (string)$this->_response->getBody();
         $this->assertNotEmpty($body, 'Response should not be empty');
-        
+
         // Note: XML response depends on view template configuration
         // For now, we just verify that the endpoint is accessible and returns 401
         // The actual XML format would depend on the view template implementation
@@ -768,10 +772,10 @@ class UsersControllerTest extends TestCase
 
         // Should return 401 (unauthorized)
         $this->assertResponseCode(401);
-        
+
         // Check for unexpected console output
         $this->assertEmpty($consoleOutput, 'Unauthorized endpoint should not produce console output');
-        
+
         // Verify the response status is explicitly set to 401
         $this->assertEquals(401, $this->_response->getStatusCode(), 'HTTP status should be 401 Unauthorized');
     }
@@ -784,11 +788,11 @@ class UsersControllerTest extends TestCase
     public function testUnauthorizedWithDifferentHttpMethods(): void
     {
         $httpMethods = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'];
-        
+
         foreach ($httpMethods as $method) {
             $consoleOutput = $this->captureConsoleOutput(function () use ($method): void {
                 $this->configRequest(['headers' => ['Accept' => 'application/json']]);
-                
+
                 switch ($method) {
                     case 'GET':
                         $this->get('/api/users/unauthorized');
@@ -810,10 +814,10 @@ class UsersControllerTest extends TestCase
 
             // Should return 401 (unauthorized) for all methods
             $this->assertResponseCode(401, "Unauthorized endpoint should return 401 for {$method} method");
-            
+
             // Check for unexpected console output
             $this->assertEmpty($consoleOutput, "Unauthorized endpoint should not produce console output for {$method} method");
-            
+
             // Note: Some methods might be blocked by authentication middleware
             // We just verify that the endpoint returns 401 status for all methods
             $body = (string)$this->_response->getBody();
@@ -835,17 +839,17 @@ class UsersControllerTest extends TestCase
 
         $this->assertResponseCode(401);
         $this->assertContentType('text/html');
-        
+
         $body = (string)$this->_response->getBody();
         $this->assertNotEmpty($body, 'Response should not be empty');
-        
+
         // Should contain authentication error message from middleware
         $this->assertStringContainsString('Authentication is required to continue', $body, 'Response should contain authentication error message');
-        
+
         // Should be HTML format, not JSON
         $this->assertStringContainsString('<html>', $body, 'Response should be HTML format');
         $this->assertStringContainsString('</html>', $body, 'Response should be HTML format');
-        
+
         $this->assertEmpty($consoleOutput, 'Unauthorized endpoint should not produce console output');
     }
 
@@ -861,7 +865,7 @@ class UsersControllerTest extends TestCase
             $this->enableCsrfToken();
             $this->enableSecurityToken();
             $this->configRequest(['headers' => ['Accept' => 'application/json']]);
-            
+
             $this->post('/api/users/login', [
                 'username' => self::VALID_USERNAME,
                 'password' => self::VALID_PASSWORD,
@@ -877,8 +881,8 @@ class UsersControllerTest extends TestCase
             $this->configRequest([
                 'headers' => [
                     'Accept' => 'application/json',
-                    'Authorization' => 'Bearer ' . $token
-                ]
+                    'Authorization' => 'Bearer ' . $token,
+                ],
             ]);
             $this->get('/api/users/test');
         });
@@ -886,22 +890,22 @@ class UsersControllerTest extends TestCase
         // Should return 200 (success)
         $this->assertResponseCode(200);
         $this->assertContentType('application/json');
-        
+
         // Check for unexpected console output
         $this->assertEmpty($consoleOutput, 'Test endpoint should not produce console output');
-        
+
         $body = (string)$this->_response->getBody();
         $this->assertJson($body, 'Response should be valid JSON');
-        
+
         $response = json_decode($body, true);
         $this->assertNotNull($response, 'Response should be valid JSON');
-        
+
         // The test() method returns the authentication result
         // Let's check what we actually get
         if (empty($response)) {
             $this->markTestSkipped('Authentication result is empty - this might be expected behavior');
         }
-        
+
         // If we get a response, it should be valid
         $this->assertIsArray($response, 'Authentication result should be an array');
     }
@@ -921,13 +925,13 @@ class UsersControllerTest extends TestCase
         // Should return 401 (unauthorized) from authentication middleware
         $this->assertResponseCode(401);
         $this->assertContentType('text/html');
-        
+
         // Check for unexpected console output
         $this->assertEmpty($consoleOutput, 'Test endpoint should not produce console output');
-        
+
         $body = (string)$this->_response->getBody();
         $this->assertNotEmpty($body, 'Response should not be empty');
-        
+
         // Should contain authentication error message from middleware
         $this->assertStringContainsString('Authentication is required to continue', $body, 'Response should contain authentication error message');
     }
@@ -944,7 +948,7 @@ class UsersControllerTest extends TestCase
             $this->enableCsrfToken();
             $this->enableSecurityToken();
             $this->configRequest(['headers' => ['Accept' => 'application/json']]);
-            
+
             $this->post('/api/users/login', [
                 'username' => self::VALID_USERNAME,
                 'password' => self::VALID_PASSWORD,
@@ -960,27 +964,27 @@ class UsersControllerTest extends TestCase
             $this->configRequest([
                 'headers' => [
                     'Accept' => 'application/json',
-                    'Authorization' => 'Bearer ' . $token
-                ]
+                    'Authorization' => 'Bearer ' . $token,
+                ],
             ]);
             $this->get('/api/users/test');
         });
 
         $this->assertResponseCode(200);
         $this->assertContentType('application/json');
-        
+
         $body = (string)$this->_response->getBody();
         $this->assertJson($body, 'Response should be valid JSON');
-        
+
         $response = json_decode($body, true);
         $this->assertNotNull($response, 'Response should be valid JSON');
-        
+
         // The test() method returns authentication result
         // It might be empty, which could be expected behavior
         if (!empty($response)) {
             $this->assertIsArray($response, 'Authentication result should be an array if not empty');
         }
-        
+
         $this->assertEmpty($consoleOutput, 'Test endpoint should not produce console output');
     }
 
@@ -996,7 +1000,7 @@ class UsersControllerTest extends TestCase
             $this->enableCsrfToken();
             $this->enableSecurityToken();
             $this->configRequest(['headers' => ['Accept' => 'application/json']]);
-            
+
             $this->post('/api/users/login', [
                 'username' => self::VALID_USERNAME,
                 'password' => self::VALID_PASSWORD,
@@ -1008,16 +1012,16 @@ class UsersControllerTest extends TestCase
         $token = $loginData['token'];
 
         $httpMethods = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'];
-        
+
         foreach ($httpMethods as $method) {
             $consoleOutput = $this->captureConsoleOutput(function () use ($method, $token): void {
                 $this->configRequest([
                     'headers' => [
                         'Accept' => 'application/json',
-                        'Authorization' => 'Bearer ' . $token
-                    ]
+                        'Authorization' => 'Bearer ' . $token,
+                    ],
                 ]);
-                
+
                 switch ($method) {
                     case 'GET':
                         $this->get('/api/users/test');
@@ -1041,9 +1045,9 @@ class UsersControllerTest extends TestCase
             // Other methods might return 405 (Method Not Allowed) or 200
             $this->assertTrue(
                 in_array($this->_response->getStatusCode(), [200, 405]),
-                "Test endpoint should return 200 or 405 for {$method} method, got {$this->_response->getStatusCode()}"
+                "Test endpoint should return 200 or 405 for {$method} method, got {$this->_response->getStatusCode()}",
             );
-            
+
             // Check for unexpected console output
             $this->assertEmpty($consoleOutput, "Test endpoint should not produce console output for {$method} method");
         }

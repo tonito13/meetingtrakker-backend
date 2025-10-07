@@ -16,7 +16,7 @@ class ScorecardTemplatesController extends ApiController
 
     public function addScorecardForm()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['post']);
 
         // Authentication check
@@ -33,8 +33,14 @@ class ScorecardTemplatesController extends ApiController
 
         try {
             $data = $this->request->getData();
-            $company_id = $authResult->getData()->company_id;
-            $username = $authResult->getData()->username ?? 'system';
+            $company_id = $this->getCompanyId($authResult);
+            $authData = $authResult->getData();
+            $username = 'system';
+            if ($authData instanceof \ArrayObject || is_array($authData)) {
+                $username = $authData['username'] ?? $authData['sub'] ?? 'system';
+            } elseif (is_object($authData)) {
+                $username = $authData->username ?? $authData->sub ?? 'system';
+            }
 
             // Validate required fields
             if (empty($data['structure'])) {
@@ -85,7 +91,7 @@ class ScorecardTemplatesController extends ApiController
 
     public function updateScorecardForm()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['post']);
 
         // Authentication check
@@ -102,7 +108,7 @@ class ScorecardTemplatesController extends ApiController
 
         try {
             $data = $this->request->getData();
-            $company_id = $authResult->getData()->company_id;
+            $company_id = $this->getCompanyId($authResult);
 
             // Validate required fields
             if (empty($data['id'])) {
@@ -174,7 +180,7 @@ class ScorecardTemplatesController extends ApiController
 
     public function getScorecardForm()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['get']);
 
         $authResult = $this->Authentication->getResult();
@@ -188,7 +194,7 @@ class ScorecardTemplatesController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
 
         try {
             // Get tenant-specific table
@@ -220,7 +226,7 @@ class ScorecardTemplatesController extends ApiController
 
     public function getScorecardTemplate()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['get']);
 
         $authResult = $this->Authentication->getResult();
@@ -234,7 +240,7 @@ class ScorecardTemplatesController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
 
         try {
             // Get tenant-specific table
@@ -262,5 +268,19 @@ class ScorecardTemplatesController extends ApiController
                 'message' => 'Error fetching scorecard template: ' . $e->getMessage(),
             ]));
         }
+    }
+
+    /**
+     * Helper method to extract company_id from authentication result
+     */
+    private function getCompanyId($authResult)
+    {
+        $authData = $authResult->getData();
+        if ($authData instanceof \ArrayObject || is_array($authData)) {
+            return $authData['company_id'] ?? null;
+        } elseif (is_object($authData)) {
+            return $authData->company_id ?? null;
+        }
+        return null;
     }
 }

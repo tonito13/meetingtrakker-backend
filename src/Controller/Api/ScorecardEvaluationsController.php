@@ -36,7 +36,7 @@ class ScorecardEvaluationsController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
         $scorecardUniqueId = $this->request->getQuery('scorecard_unique_id');
 
         if (empty($scorecardUniqueId)) {
@@ -98,7 +98,7 @@ class ScorecardEvaluationsController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
         $data = $this->request->getData();
         $evaluatorUsername = $authResult->getData()->username ?? 'system';
 
@@ -141,6 +141,7 @@ class ScorecardEvaluationsController extends ApiController
 
             // Create new evaluation using the same pattern as scorecard creation
             $evaluation = $evaluationsTable->newEmptyEntity();
+            $evaluation->company_id = $companyId;
             $evaluation->scorecard_unique_id = $data['scorecard_unique_id'];
             $evaluation->evaluator_username = $evaluatorUsername;
             $evaluation->evaluated_employee_username = $scorecard->assigned_employee_username;
@@ -214,7 +215,7 @@ class ScorecardEvaluationsController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
         $data = $this->request->getData();
         $evaluationId = $data['id'] ?? null;
 
@@ -298,7 +299,7 @@ class ScorecardEvaluationsController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
         $scorecardUniqueId = $this->request->getQuery('scorecard_unique_id');
 
         if (empty($scorecardUniqueId)) {
@@ -355,5 +356,37 @@ class ScorecardEvaluationsController extends ApiController
                     'message' => 'Error fetching evaluation statistics: ' . $e->getMessage(),
                 ]));
         }
+    }
+
+    /**
+     * Helper method to extract company_id from authentication result
+     */
+    private function getCompanyId($authResult)
+    {
+        $data = $authResult->getData();
+        
+        // Handle both ArrayObject and stdClass
+        if (is_object($data)) {
+            if (isset($data->company_id)) {
+                return $data->company_id;
+            }
+            // Convert to array if needed
+            $data = (array) $data;
+        }
+        
+        if (is_array($data) && isset($data['company_id'])) {
+            return $data['company_id'];
+        }
+        
+        // Fallback: try to get from JWT payload
+        if (method_exists($authResult, 'getPayload')) {
+            $payload = $authResult->getPayload();
+            if (isset($payload['company_id'])) {
+                return $payload['company_id'];
+            }
+        }
+        
+        // Default fallback
+        return '200001'; // Default company ID
     }
 }

@@ -39,7 +39,7 @@ class ScorecardsController extends ApiController
                 ]));
         }
 
-        $company_id = $authResult->getData()->company_id;
+        $company_id = $this->getCompanyId($authResult);
         try {
             $ScorecardTemplatesTable = $this->getTable('ScorecardTemplates', $company_id);
 
@@ -69,6 +69,9 @@ class ScorecardsController extends ApiController
 
             // Iterate through structure groups to find the fields
             foreach ($structure as $group) {
+                if (!isset($group['fields']) || !is_array($group['fields'])) {
+                    continue;
+                }
                 foreach ($group['fields'] as $field) {
                     $label = $field['label'];
                     if (in_array($label, ['Code', 'Strategies/Tactics', 'Measures', 'Deadline', 'Points', 'Weight (%)'])) {
@@ -135,7 +138,7 @@ class ScorecardsController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
 
         try {
             // Get tenant-specific table
@@ -193,7 +196,7 @@ class ScorecardsController extends ApiController
                 ]));
         }
 
-        $company_id = $authResult->getData()->company_id;
+        $company_id = $this->getCompanyId($authResult);
         $authData = $authResult->getData();
         $currentUsername = $authData->username ?? 'system';
 
@@ -203,6 +206,28 @@ class ScorecardsController extends ApiController
         $search = $this->request->getQuery('search') ?? '';
         $sortField = $this->request->getQuery('sortField') ?? '';
         $sortOrder = $this->request->getQuery('sortOrder') ?? 'asc';
+
+        // Sanitize search input to prevent SQL injection and XSS
+        $search = $this->sanitizeSearchInput($search);
+        
+        // Limit search length to prevent DoS attacks
+        if (strlen($search) > 100) {
+            $search = substr($search, 0, 100);
+        }
+        
+        // If search contains suspicious patterns, return empty results immediately
+        if ($this->isSuspiciousSearch($search)) {
+            return $this->response->withType('application/json')->withStringBody(json_encode([
+                'success' => true,
+                'data' => [
+                    'records' => [],
+                    'total' => 0,
+                    'page' => $page,
+                    'limit' => $limit,
+                    'totalPages' => 0
+                ]
+            ]));
+        }
 
         Log::debug('🔍 DEBUG: getScorecardsData - Sort parameters received', [
             'sortField' => $sortField,
@@ -315,39 +340,37 @@ class ScorecardsController extends ApiController
                 
                 // Apply search filter
                 if (!empty($search)) {
-                    $searchLower = strtolower($search);
-                    $found = false;
-                    
-                    Log::debug('🔍 DEBUG: Search filter applied', [
-                        'search' => $search,
-                        'searchLower' => $searchLower,
-                        'scorecardCode' => $scorecardCode,
-                        'answers' => $answers
-                    ]);
-                    
-                    // Search in scorecard code
-                    if (strpos(strtolower($scorecardCode), $searchLower) !== false) {
-                        $found = true;
-                        Log::debug('🔍 DEBUG: Found match in scorecard code');
-                    }
-                    
-                    // Search in all answer fields
-                    if (is_array($answers)) {
-                        foreach ($answers as $fieldId => $value) {
-                            if (is_string($value) && strpos(strtolower($value), $searchLower) !== false) {
+                    try {
+                        $searchLower = strtolower($search);
+                        $found = false;
+                        
+                        // Search in scorecard code
+                        if (!empty($scorecardCode)) {
+                            $scorecardCodeLower = strtolower($scorecardCode);
+                            if (strpos($scorecardCodeLower, $searchLower) !== false) {
                                 $found = true;
-                                Log::debug('🔍 DEBUG: Found match in field', [
-                                    'fieldId' => $fieldId,
-                                    'value' => $value
-                                ]);
-                                break;
                             }
                         }
-                    }
-                    
-                    if (!$found) {
-                        Log::debug('🔍 DEBUG: No match found, skipping record');
-                        continue; // Skip this record if search doesn't match
+                        
+                        // Search in all answer fields
+                        if (is_array($answers)) {
+                            foreach ($answers as $fieldId => $value) {
+                                if (is_string($value) && !empty($value)) {
+                                    $valueLower = strtolower($value);
+                                    if (strpos($valueLower, $searchLower) !== false) {
+                                        $found = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if (!$found) {
+                            continue; // Skip this record if search doesn't match
+                        }
+                    } catch (\Exception $e) {
+                        // If search processing fails, skip this record to prevent hanging
+                        continue;
                     }
                 }
 
@@ -452,7 +475,7 @@ class ScorecardsController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
         $data = $this->request->getData();
         
         $scorecardUniqueId = $data['scorecardUniqueId'] ?? null;
@@ -561,7 +584,7 @@ class ScorecardsController extends ApiController
 
         try {
             $data = $this->request->getData();
-            $company_id = $authResult->getData()->company_id;
+            $company_id = $this->getCompanyId($authResult);
             $scorecard_unique_id = $data['scorecard_unique_id'] ?? null;
 
             if (empty($scorecard_unique_id)) {
@@ -670,7 +693,7 @@ class ScorecardsController extends ApiController
             return [];
         }
 
-        $company_id = $authResult->getData()->company_id;
+        $company_id = $this->getCompanyId($authResult);
         
         try {
             $template = $this->getTable('ScorecardTemplates', $company_id)
@@ -967,7 +990,7 @@ class ScorecardsController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
         $data = $this->request->getData();
 
         try {
@@ -1333,7 +1356,7 @@ class ScorecardsController extends ApiController
         $answerEntity->company_id = $companyId;
         $answerEntity->scorecard_unique_id = $scorecardUniqueId;
         $answerEntity->template_id = $templateId;
-        $answerEntity->answers = $answers;
+        $answerEntity->answers = is_array($answers) ? json_encode($answers) : $answers;
         $answerEntity->assigned_employee_username = $assignedEmployeeUsername;
         $answerEntity->created_by = $createdBy;
         $answerEntity->deleted = 0;
@@ -1374,7 +1397,7 @@ class ScorecardsController extends ApiController
         $answerEntity->company_id = $companyId;
         $answerEntity->scorecard_unique_id = $scorecardUniqueId;
         $answerEntity->template_id = $templateId;
-        $answerEntity->answers = $answers;
+        $answerEntity->answers = is_array($answers) ? json_encode($answers) : $answers;
         $answerEntity->assigned_employee_username = $assignedEmployeeUsername;
         $answerEntity->parent_scorecard_id = $parentScorecardId;
         $answerEntity->created_by = $createdBy;
@@ -1421,7 +1444,7 @@ class ScorecardsController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
         $authData = $authResult->getData();
         $currentUsername = $authData->username ?? 'system';
 
@@ -1429,6 +1452,28 @@ class ScorecardsController extends ApiController
         $page = (int)($this->request->getQuery('page', 1));
         $limit = (int)($this->request->getQuery('limit', 10));
         $search = $this->request->getQuery('search', '');
+        
+        // Sanitize search input to prevent SQL injection and XSS
+        $search = $this->sanitizeSearchInput($search);
+        
+        // Limit search length to prevent DoS attacks
+        if (strlen($search) > 100) {
+            $search = substr($search, 0, 100);
+        }
+        
+        // If search contains suspicious patterns, return empty results immediately
+        if ($this->isSuspiciousSearch($search)) {
+            return $this->response->withType('application/json')->withStringBody(json_encode([
+                'success' => true,
+                'data' => [
+                    'records' => [],
+                    'total' => 0,
+                    'page' => $page,
+                    'limit' => $limit,
+                    'totalPages' => 0
+                ]
+            ]));
+        }
         $sortField = $this->request->getQuery('sortField', '');
         $sortOrder = $this->request->getQuery('sortOrder', 'asc');
 
@@ -1516,39 +1561,37 @@ class ScorecardsController extends ApiController
                 
                 // Apply search filter
                 if (!empty($search)) {
-                    $searchLower = strtolower($search);
-                    $found = false;
-                    
-                    Log::debug('🔍 DEBUG: Search filter applied', [
-                        'search' => $search,
-                        'searchLower' => $searchLower,
-                        'scorecardCode' => $scorecardCode,
-                        'answers' => $answers
-                    ]);
-                    
-                    // Search in scorecard code
-                    if (strpos(strtolower($scorecardCode), $searchLower) !== false) {
-                        $found = true;
-                        Log::debug('🔍 DEBUG: Found match in scorecard code');
-                    }
-                    
-                    // Search in all answer fields
-                    if (is_array($answers)) {
-                        foreach ($answers as $fieldId => $value) {
-                            if (is_string($value) && strpos(strtolower($value), $searchLower) !== false) {
+                    try {
+                        $searchLower = strtolower($search);
+                        $found = false;
+                        
+                        // Search in scorecard code
+                        if (!empty($scorecardCode)) {
+                            $scorecardCodeLower = strtolower($scorecardCode);
+                            if (strpos($scorecardCodeLower, $searchLower) !== false) {
                                 $found = true;
-                                Log::debug('🔍 DEBUG: Found match in field', [
-                                    'fieldId' => $fieldId,
-                                    'value' => $value
-                                ]);
-                                break;
                             }
                         }
-                    }
-                    
-                    if (!$found) {
-                        Log::debug('🔍 DEBUG: No match found, skipping record');
-                        continue; // Skip this record if search doesn't match
+                        
+                        // Search in all answer fields
+                        if (is_array($answers)) {
+                            foreach ($answers as $fieldId => $value) {
+                                if (is_string($value) && !empty($value)) {
+                                    $valueLower = strtolower($value);
+                                    if (strpos($valueLower, $searchLower) !== false) {
+                                        $found = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if (!$found) {
+                            continue; // Skip this record if search doesn't match
+                        }
+                    } catch (\Exception $e) {
+                        // If search processing fails, skip this record to prevent hanging
+                        continue;
                     }
                 }
 
@@ -1617,13 +1660,22 @@ class ScorecardsController extends ApiController
                 ]));
 
         } catch (\Exception $e) {
-            Log::error('Error in getMyScorecardsData: ' . $e->getMessage());
+            Log::error('Error in getMyScorecardsData: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine()
+            ]);
             return $this->response
                 ->withStatus(500)
                 ->withType('application/json')
                 ->withStringBody(json_encode([
                     'success' => false,
-                    'message' => 'Error fetching my scorecards data: ' . $e->getMessage()
+                    'message' => 'Error fetching my scorecards data: ' . $e->getMessage(),
+                    'debug' => [
+                        'file' => $e->getFile(),
+                        'line' => $e->getLine(),
+                        'trace' => $e->getTraceAsString()
+                    ]
                 ]));
         }
     }
@@ -1649,7 +1701,7 @@ class ScorecardsController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
         $authData = $authResult->getData();
         $currentUsername = $authData->username ?? 'system';
 
@@ -1657,6 +1709,28 @@ class ScorecardsController extends ApiController
         $page = (int)($this->request->getQuery('page', 1));
         $limit = (int)($this->request->getQuery('limit', 10));
         $search = $this->request->getQuery('search', '');
+        
+        // Sanitize search input to prevent SQL injection and XSS
+        $search = $this->sanitizeSearchInput($search);
+        
+        // Limit search length to prevent DoS attacks
+        if (strlen($search) > 100) {
+            $search = substr($search, 0, 100);
+        }
+        
+        // If search contains suspicious patterns, return empty results immediately
+        if ($this->isSuspiciousSearch($search)) {
+            return $this->response->withType('application/json')->withStringBody(json_encode([
+                'success' => true,
+                'data' => [
+                    'records' => [],
+                    'total' => 0,
+                    'page' => $page,
+                    'limit' => $limit,
+                    'totalPages' => 0
+                ]
+            ]));
+        }
         $sortField = $this->request->getQuery('sortField', '');
         $sortOrder = $this->request->getQuery('sortOrder', 'asc');
 
@@ -1956,7 +2030,7 @@ class ScorecardsController extends ApiController
         }
 
         $data = $this->request->getData();
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
         $scorecardUniqueId = $data['scorecard_unique_id'] ?? null;
 
         // Validation
@@ -2130,7 +2204,7 @@ class ScorecardsController extends ApiController
         }
 
         $data = $this->request->getData();
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
         $answers = $data['answers'] ?? null;
         $templateId = $data['template_id'] ?? null;
         $scorecardUniqueId = $data['scorecard_unique_id'] ?? null;
@@ -2311,5 +2385,117 @@ class ScorecardsController extends ApiController
                     'error' => $e->getMessage(),
                 ]));
         }
+    }
+
+    /**
+     * Sanitize search input to prevent SQL injection and XSS attacks
+     * 
+     * @param string $input The input string to sanitize
+     * @return string The sanitized input
+     */
+    private function sanitizeSearchInput(string $input): string
+    {
+        try {
+            // Remove or escape dangerous SQL characters
+            $dangerousPatterns = [
+                '/[\'";]/',           // Remove quotes and semicolons
+                '/--/',              // Remove SQL comments
+                '/\/\*/',            // Remove SQL comment start
+                '/\*\//',            // Remove SQL comment end
+                '/union\s+select/i', // Remove UNION SELECT
+                '/drop\s+table/i',  // Remove DROP TABLE
+                '/delete\s+from/i',  // Remove DELETE FROM
+                '/insert\s+into/i', // Remove INSERT INTO
+                '/update\s+set/i',   // Remove UPDATE SET
+                '/create\s+table/i',// Remove CREATE TABLE
+                '/alter\s+table/i',  // Remove ALTER TABLE
+                '/exec\s*\(/i',      // Remove EXEC(
+                '/execute\s*\(/i',   // Remove EXECUTE(
+                '/sp_/i',            // Remove stored procedure calls
+                '/xp_/i',            // Remove extended procedure calls
+            ];
+
+            $sanitized = $input;
+            foreach ($dangerousPatterns as $pattern) {
+                $sanitized = preg_replace($pattern, '', $sanitized);
+            }
+
+            // Remove any remaining potentially dangerous characters
+            $sanitized = preg_replace('/[<>]/', '', $sanitized);
+            
+            // Handle special characters that might cause issues
+            $sanitized = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $sanitized); // Remove control characters
+            $sanitized = preg_replace('/[\r\n\t]/', ' ', $sanitized); // Replace newlines/tabs with spaces
+            
+            // Trim whitespace
+            $sanitized = trim($sanitized);
+            
+            // If the input was completely sanitized away, return empty string
+            if (empty($sanitized)) {
+                return '';
+            }
+
+            return $sanitized;
+        } catch (\Exception $e) {
+            // If sanitization fails, return empty string to prevent issues
+            return '';
+        }
+    }
+
+    /**
+     * Check if search input contains suspicious patterns
+     */
+    private function isSuspiciousSearch(string $search): bool
+    {
+        $suspiciousPatterns = [
+            '/drop\s+table/i',
+            '/delete\s+from/i',
+            '/union\s+select/i',
+            '/insert\s+into/i',
+            '/update\s+set/i',
+            '/exec\s*\(/i',
+            '/sp_/i',
+            '/xp_/i'
+        ];
+        
+        foreach ($suspiciousPatterns as $pattern) {
+            if (preg_match($pattern, $search)) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+
+    /**
+     * Helper method to extract company_id from authentication result
+     */
+    private function getCompanyId($authResult)
+    {
+        $data = $authResult->getData();
+        
+        // Handle both ArrayObject and stdClass
+        if (is_object($data)) {
+            if (isset($data->company_id)) {
+                return $data->company_id;
+            }
+            // Convert to array if needed
+            $data = (array) $data;
+        }
+        
+        if (is_array($data) && isset($data['company_id'])) {
+            return $data['company_id'];
+        }
+        
+        // Fallback: try to get from JWT payload
+        if (method_exists($authResult, 'getPayload')) {
+            $payload = $authResult->getPayload();
+            if (isset($payload['company_id'])) {
+                return $payload['company_id'];
+            }
+        }
+        
+        // Default fallback
+        return '200001'; // Default company ID
     }
 }

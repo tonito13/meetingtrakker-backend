@@ -87,12 +87,16 @@ class ApiController extends Controller
         if($this->request->getParam('prefix') === 'Api')
         {
             $authentication_result = $this->Authentication->getResult();
-    //         debug($authentication_result);
-    //   debug($authentication_result->isValid());exit;
             if($authentication_result->isValid()){
+                // Only regenerate token if it's a fresh login (Form authentication)
+                // JWT authentication already has a valid token, no need to regenerate
                 $user_information = $authentication_result->getData();
-                $token = $this->generateToken($user_information);
-                $this->response = $this->response->withHeader('Authorization', 'Bearer ' . $token);
+                if (!is_array($user_information) && !($user_information instanceof \ArrayObject)) {
+                    // This is a user object from Form authentication, generate a token
+                    $token = $this->generateToken($user_information);
+                    $this->response = $this->response->withHeader('Authorization', 'Bearer ' . $token);
+                }
+                // For JWT authentication, the token is already in the Authorization header, no need to regenerate
             }else{
                 $this->response = $this->response->withStatus(401)
                 ->withType('application/json')
@@ -130,7 +134,12 @@ class ApiController extends Controller
             if ($companyId == 'default') {
                 $connection = ConnectionManager::get('default');
             } else {
-                $connection = ConnectionManager::get('client_' . $companyId);
+                // In test environment, use the test connection for company-specific tables
+                if (Configure::read('debug') && php_sapi_name() === 'cli') {
+                    $connection = ConnectionManager::get('test');
+                } else {
+                    $connection = ConnectionManager::get('client_' . $companyId);
+                }
             }
 
             $registry = TableRegistry::getTableLocator();
@@ -162,13 +171,18 @@ class ApiController extends Controller
         $jwtKey = file_get_contents(CONFIG . '/jwt.key');
         $issuedAt = time();
 
+        // Handle both user objects and JWT payload arrays/objects
+        if (is_array($user) || $user instanceof \ArrayObject) {
+            $userId = $user['sub'] ?? null;
+            $companyId = $user['company_id'] ?? null;
+        } else {
+            $userId = $user->id ?? null;
+            $companyId = $user->company_id ?? null;
+        }
+
         $payload = [
-            // 'uinf' => [
-            //     'id' => $user->id,
-            //     'username' => $user->username,
-            //     'email' => $user->email_address
-            // ],
-            'sub' => $user->id,
+            'sub' => $userId,
+            'company_id' => $companyId,
             'exp' => time() + 28800,
             'iat' => $issuedAt,
         ];

@@ -18,7 +18,7 @@ class EmployeeTemplatesController extends ApiController
 
     public function createTemplate()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['post']);
 
         // Authentication check
@@ -34,8 +34,14 @@ class EmployeeTemplatesController extends ApiController
         }
 
         $data = $this->request->getData();
-        $company_id = $authResult->getData()->company_id;
-        $username = $authResult->getData()->username;
+        $company_id = $this->getCompanyId($authResult);
+        $authData = $authResult->getData();
+        $username = null;
+        if ($authData instanceof \ArrayObject || is_array($authData)) {
+            $username = $authData['username'] ?? $authData['sub'] ?? null;
+        } elseif (is_object($authData)) {
+            $username = $authData->username ?? $authData->sub ?? null;
+        }
         // debug($company_id);
         $EmployeeTemplatesTable = $this->getTable('EmployeeTemplates', $company_id);
         // debug($data);exit;
@@ -63,7 +69,7 @@ class EmployeeTemplatesController extends ApiController
 
     public function updateTemplate()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['post']);
 
         // Authentication check
@@ -80,7 +86,7 @@ class EmployeeTemplatesController extends ApiController
 
         try {
             $data = $this->request->getData();
-            $company_id = $authResult->getData()->company_id;
+            $company_id = $this->getCompanyId($authResult);
 
             // Validate required fields
             if (empty($data['id'])) {
@@ -152,7 +158,7 @@ class EmployeeTemplatesController extends ApiController
 
     public function getEmployeeTemplateFields()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['get']);
 
         $authResult = $this->Authentication->getResult();
@@ -166,7 +172,7 @@ class EmployeeTemplatesController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
 
         try {
             // Get tenant-specific table
@@ -205,7 +211,7 @@ class EmployeeTemplatesController extends ApiController
 
     public function getEmployeeTemplate()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['get']);
 
         $authResult = $this->Authentication->getResult();
@@ -219,7 +225,7 @@ class EmployeeTemplatesController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
 
         try {
             // Get tenant-specific table
@@ -247,5 +253,19 @@ class EmployeeTemplatesController extends ApiController
                 'message' => 'Error fetching job role template: ' . $e->getMessage(),
             ]));
         }
+    }
+
+    /**
+     * Helper method to extract company_id from authentication result
+     */
+    private function getCompanyId($authResult)
+    {
+        $authData = $authResult->getData();
+        if ($authData instanceof \ArrayObject || is_array($authData)) {
+            return $authData['company_id'] ?? null;
+        } elseif (is_object($authData)) {
+            return $authData->company_id ?? null;
+        }
+        return null;
     }
 }

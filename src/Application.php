@@ -21,7 +21,7 @@ use Cake\Routing\Router;
 use Authorization\Middleware\AuthorizationMiddleware;
 use Authentication\Authenticator\JwtAuthenticator;
 use Authentication\Authenticator\AuthenticationRequiredException;
-// use App\Middleware\CorsMiddleware; 
+use App\Middleware\CorsMiddleware; 
 
 use Authentication\AuthenticationServiceInterface;
 use Authentication\Identifier\AbstractIdentifier;
@@ -68,6 +68,7 @@ class Application extends BaseApplication implements AuthenticationServiceProvid
             // available as array through $request->getData()
             // https://book.cakephp.org/4/en/controllers/middleware.html#body-parser-middleware
             ->add(new BodyParserMiddleware())
+            ->add(new CorsMiddleware())
             ->add(new AuthenticationMiddleware($this));
 
             // Cross Site Request Forgery (CSRF) Protection Middleware
@@ -132,7 +133,7 @@ class Application extends BaseApplication implements AuthenticationServiceProvid
             $service->loadAuthenticator('Authentication.Jwt', [
                 'secretKey' => file_get_contents(CONFIG . '/jwt.pem'),
                 'algorithm' => 'RS256',
-                'returnPayload' => false,
+                'returnPayload' => true,
                 'authError' => 'Did you really think you are allowed to see that?',
             ]);
 

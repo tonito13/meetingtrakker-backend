@@ -18,7 +18,7 @@ class JobRoleTemplatesController extends ApiController
 
     public function addJobRoleForm()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['post']);
 
         // Authentication check
@@ -34,10 +34,9 @@ class JobRoleTemplatesController extends ApiController
         }
 
         $data = $this->request->getData();
-        $company_id = $authResult->getData()->company_id;
-        // debug($company_id);
+        $company_id = $this->getCompanyId($authResult);
         $jobRoleTemplatesTable = $this->getTable('JobRoleTemplates', $company_id);
-        // debug($data);exit;
+        
         $jobRoleTemplate = $jobRoleTemplatesTable->newEntity([
             'name' => $data['name'] ?? 'Untitled',
             'structure' => $data['structure'] ?? [],
@@ -51,8 +50,7 @@ class JobRoleTemplatesController extends ApiController
             ]));
             
         } else {
-            $this->response = $this->response->withStatus(422);
-            return $this->response->withType('application/json')->withStringBody(json_encode([
+            return $this->response->withStatus(422)->withType('application/json')->withStringBody(json_encode([
                 'success' => false,
                 'errors' => $jobRoleTemplate->getErrors(),
             ]));
@@ -61,7 +59,7 @@ class JobRoleTemplatesController extends ApiController
 
     public function updateJobRoleForm()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['post']);
 
         // Authentication check
@@ -78,7 +76,7 @@ class JobRoleTemplatesController extends ApiController
 
         try {
             $data = $this->request->getData();
-            $company_id = $authResult->getData()->company_id;
+            $company_id = $this->getCompanyId($authResult);
 
             // Validate required fields
             if (empty($data['id'])) {
@@ -150,7 +148,7 @@ class JobRoleTemplatesController extends ApiController
 
     public function getJobRoleForm()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['get']);
 
         $authResult = $this->Authentication->getResult();
@@ -164,7 +162,7 @@ class JobRoleTemplatesController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
 
         try {
             // Get tenant-specific table
@@ -201,9 +199,9 @@ class JobRoleTemplatesController extends ApiController
         }
     }
 
-    public function getJobRoleFields()
+    public function getJobRoleTemplate()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['get']);
 
         $authResult = $this->Authentication->getResult();
@@ -217,7 +215,65 @@ class JobRoleTemplatesController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
+        $templateId = $this->request->getQuery('id');
+
+        if (!$templateId) {
+            return $this->response->withStatus(400)->withType('application/json')->withStringBody(json_encode([
+                'success' => false,
+                'message' => 'Template ID is required',
+            ]));
+        }
+
+        try {
+            // Get tenant-specific table
+            $JobRoleTemplatesTable = $this->getTable('JobRoleTemplates', $companyId);
+
+            $template = $JobRoleTemplatesTable->find()
+                ->select(['id', 'name', 'structure'])
+                ->where([
+                    'id' => $templateId,
+                    'company_id' => $companyId,
+                    'deleted' => 0
+                ])
+                ->first();
+
+            if (!$template) {
+                return $this->response->withStatus(404)->withType('application/json')->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Template not found',
+                ]));
+            }
+
+            return $this->response->withType('application/json')->withStringBody(json_encode([
+                'success' => true,
+                'data' => $template,
+            ]));
+        } catch (\Throwable $e) {
+            return $this->response->withStatus(500)->withType('application/json')->withStringBody(json_encode([
+                'success' => false,
+                'message' => 'Error fetching job role template: ' . $e->getMessage(),
+            ]));
+        }
+    }
+
+    public function getJobRoleFields()
+    {
+        Configure::write('debug', true);
+        $this->request->allowMethod(['get']);
+
+        $authResult = $this->Authentication->getResult();
+        if (!$authResult || !$authResult->isValid()) {
+            return $this->response
+                ->withStatus(401)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Unauthorized access',
+                ]));
+        }
+
+        $companyId = $this->getCompanyId($authResult);
 
         try {
             // Get tenant-specific table
@@ -249,7 +305,7 @@ class JobRoleTemplatesController extends ApiController
 
     public function getJobRoleFieldsAndAnswers()
 {
-    Configure::write('debug', 1);
+    Configure::write('debug', true);
     $this->request->allowMethod(['post']);
 
     // Authentication check
@@ -264,7 +320,7 @@ class JobRoleTemplatesController extends ApiController
             ]));
     }
 
-    $companyId = $authResult->getData()->company_id;
+    $companyId = $this->getCompanyId($authResult);
     $data = $this->request->getData();
     $job_role_unique_id = $data['job_role_unique_id'] ?? null;
 
@@ -367,7 +423,7 @@ class JobRoleTemplatesController extends ApiController
             ]));
     }
 
-    $company_id = $authResult->getData()->company_id;
+            $company_id = $this->getCompanyId($authResult);
     try {
         $LevelTemplatesTable = $this->getTable('LevelTemplates', $company_id);
 
@@ -467,15 +523,27 @@ class JobRoleTemplatesController extends ApiController
             ]));
     } catch (\Throwable $e) {
         error_log('Error fetching role levels: ' . $e->getMessage());
-        return $this->response
-            ->withStatus(500)
-            ->withType('application/json')
-            ->withStringBody(json_encode([
-                'success' => false,
-                'message' => 'Error fetching role levels: ' . $e->getMessage(),
-            ]));
+            return $this->response
+                ->withStatus(500)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Error fetching role levels: ' . $e->getMessage(),
+                ]));
+        }
     }
-}
 
-
+    /**
+     * Helper method to extract company_id from authentication result
+     */
+    private function getCompanyId($authResult)
+    {
+        $authData = $authResult->getData();
+        if ($authData instanceof \ArrayObject || is_array($authData)) {
+            return $authData['company_id'] ?? null;
+        } elseif (is_object($authData)) {
+            return $authData->company_id ?? null;
+        }
+        return null;
+    }
 }

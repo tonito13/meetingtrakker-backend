@@ -7,7 +7,7 @@ namespace App\Controller\Api;
 use App\Controller\Api\ApiController;
 use Cake\Core\Configure;
 
-class TemplatesSettingsController extends ApiController
+class LevelTemplatesController extends ApiController
 {
     public function initialize(): void
     {
@@ -16,7 +16,7 @@ class TemplatesSettingsController extends ApiController
 
     public function addLevelTemplate()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['post']);
 
         // Authentication check
@@ -32,8 +32,14 @@ class TemplatesSettingsController extends ApiController
         }
 
         $data = $this->request->getData();
-        $company_id = $authResult->getData()->company_id;
-        $username = $authResult->getData()->username;
+        $company_id = $this->getCompanyId($authResult);
+        $authData = $authResult->getData();
+        $username = null;
+        if ($authData instanceof \ArrayObject || is_array($authData)) {
+            $username = $authData['username'] ?? $authData['sub'] ?? null;
+        } elseif (is_object($authData)) {
+            $username = $authData->username ?? $authData->sub ?? null;
+        }
 
         $LevelTemplatesTable = $this->getTable('LevelTemplates', $company_id);
 
@@ -63,7 +69,7 @@ class TemplatesSettingsController extends ApiController
 
     public function updateLevelTemplate()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['post']);
 
         // Authentication check
@@ -80,7 +86,7 @@ class TemplatesSettingsController extends ApiController
 
         try {
             $data = $this->request->getData();
-            $company_id = $authResult->getData()->company_id;
+            $company_id = $this->getCompanyId($authResult);
 
             // Validate required fields
             if (empty($data['id'])) {
@@ -152,7 +158,7 @@ class TemplatesSettingsController extends ApiController
 
     public function getRoleLevelForm()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['get']);
 
         $authResult = $this->Authentication->getResult();
@@ -166,7 +172,7 @@ class TemplatesSettingsController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
 
         try {
             // Get tenant-specific table
@@ -201,5 +207,77 @@ class TemplatesSettingsController extends ApiController
                 'message' => 'Error fetching employee template: ' . $e->getMessage(),
             ]));
         }
+    }
+
+    public function getLevelTemplate()
+    {
+        Configure::write('debug', true);
+        $this->request->allowMethod(['get']);
+
+        $authResult = $this->Authentication->getResult();
+        if (!$authResult || !$authResult->isValid()) {
+            return $this->response
+                ->withStatus(401)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Unauthorized access',
+                ]));
+        }
+
+        $companyId = $this->getCompanyId($authResult);
+        $templateId = $this->request->getQuery('id');
+
+        if (!$templateId) {
+            return $this->response->withStatus(400)->withType('application/json')->withStringBody(json_encode([
+                'success' => false,
+                'message' => 'Template ID is required',
+            ]));
+        }
+
+        try {
+            // Get tenant-specific table
+            $LevelTemplatesTable = $this->getTable('LevelTemplates', $companyId);
+
+            $template = $LevelTemplatesTable->find()
+                ->select(['id', 'name', 'structure'])
+                ->where([
+                    'id' => $templateId,
+                    'company_id' => $companyId,
+                    'deleted' => 0
+                ])
+                ->first();
+
+            if (!$template) {
+                return $this->response->withStatus(404)->withType('application/json')->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Template not found',
+                ]));
+            }
+
+            return $this->response->withType('application/json')->withStringBody(json_encode([
+                'success' => true,
+                'data' => $template,
+            ]));
+        } catch (\Throwable $e) {
+            return $this->response->withStatus(500)->withType('application/json')->withStringBody(json_encode([
+                'success' => false,
+                'message' => 'Error fetching level template: ' . $e->getMessage(),
+            ]));
+        }
+    }
+
+    /**
+     * Helper method to extract company_id from authentication result
+     */
+    private function getCompanyId($authResult)
+    {
+        $authData = $authResult->getData();
+        if ($authData instanceof \ArrayObject || is_array($authData)) {
+            return $authData['company_id'] ?? null;
+        } elseif (is_object($authData)) {
+            return $authData->company_id ?? null;
+        }
+        return null;
     }
 }

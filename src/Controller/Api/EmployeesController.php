@@ -26,7 +26,7 @@ class EmployeesController extends ApiController
 
         // Authentication check
         $authResult = $this->Authentication->getResult();
-        if (!$authResult || !$authResult->isValid() || !isset($authResult->getData()->company_id)) {
+        if (!$authResult || !$authResult->isValid()) {
             return $this->response
                 ->withStatus(401)
                 ->withType('application/json')
@@ -37,7 +37,7 @@ class EmployeesController extends ApiController
                 ]));
         }
 
-        $company_id = $authResult->getData()->company_id;
+        $company_id = $this->getCompanyId($authResult);
 
         try {
             $answersTable = $this->getTable('EmployeeTemplateAnswers', $company_id);
@@ -86,9 +86,18 @@ class EmployeesController extends ApiController
 
                     // Map field IDs to labels
                     $fieldMap = [];
-                    foreach ($structure as $section) {
-                        foreach ($section['fields'] as $field) {
-                            $fieldMap[$field['id']] = $field['customize_field_label'];
+                    if (is_string($structure)) {
+                        $structure = json_decode($structure, true);
+                    }
+                    if (is_array($structure)) {
+                        foreach ($structure as $section) {
+                            if (isset($section['fields']) && is_array($section['fields'])) {
+                                foreach ($section['fields'] as $field) {
+                                    if (isset($field['id']) && isset($field['customize_field_label'])) {
+                                        $fieldMap[$field['id']] = $field['customize_field_label'];
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -135,7 +144,7 @@ class EmployeesController extends ApiController
 
     public function addEmployee()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['post']);
         
         // Authentication check
@@ -150,8 +159,8 @@ class EmployeesController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
-        $logged_username = $authResult->getData()->username;
+        $companyId = $this->getCompanyId($authResult);
+        $logged_username = $this->getUsername($authResult);
         $data = $this->request->getData();
         
         // Debug: Log the received data
@@ -194,6 +203,12 @@ class EmployeesController extends ApiController
             $username = null;
 
             // Process answers and extract employee_id and username
+            Log::debug("🔍 DEBUG: AddEmployee - About to process answers", [
+                'answers' => $answers,
+                'template_id' => $template->id,
+                'template_structure' => $template->structure
+            ]);
+            
             list($answerData, $reportToEmployeeUniqueId, $employeeId, $username, $userData) = $this->processAnswers(
                 $answers,
                 $template,
@@ -267,7 +282,7 @@ class EmployeesController extends ApiController
 
     public function uploadFiles()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['post']);
 
         // Authentication check
@@ -282,7 +297,7 @@ class EmployeesController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
         $data = $this->request->getData();
         $answerId = $data['answerId'] ?? null;
         $employeeUniqueId = $data['employeeUniqueId'] ?? null;
@@ -447,7 +462,7 @@ class EmployeesController extends ApiController
             ->where([
                 'company_id' => $companyId,
                 'id' => $templateId,
-                'deleted' => 0,
+                'deleted' => false,
             ])
             ->first();
 
@@ -572,23 +587,30 @@ class EmployeesController extends ApiController
             'Contact Number' => 'contact_number',
         ];
 
+        // Decode template structure if it's a JSON string
+        $templateStructure = $template->structure;
+        if (is_string($templateStructure)) {
+            $templateStructure = json_decode($templateStructure, true);
+        }
+        
         foreach ($answers as $groupId => $groupAnswers) {
             $answerData[$groupId] = [];
             foreach ($groupAnswers as $fieldId => $value) {
-                $field = $this->findField($template->structure, $groupId, $fieldId);
+                $field = $this->findField($templateStructure, $groupId, $fieldId);
                 $displayLabel = $this->getDisplayLabel($field, $fieldId);
                 
                 Log::debug("Processing field: groupId={$groupId}, fieldId={$fieldId}, displayLabel='{$displayLabel}', value=" . json_encode($value));
+                Log::debug("Field found: " . json_encode($field));
 
-                Log::debug("Processing field: groupId=$groupId, fieldId=$fieldId, value=" . ($field && $field['type'] === 'file' ? '[File]' : json_encode($value)) . ", displayLabel=$displayLabel");
+                Log::debug("Processing field: groupId=$groupId, fieldId=$fieldId, value=" . ($field && isset($field['type']) && $field['type'] === 'file' ? '[File]' : json_encode($value)) . ", displayLabel=$displayLabel");
 
                 // Skip file validation (handled in uploadFiles)
-                if ($field && $field['type'] === 'file') {
+                if ($field && isset($field['type']) && $field['type'] === 'file') {
                     $answerData[$groupId][$fieldId] = null; // Placeholder
                     continue;
                 }
 
-                if ($field && $field['is_required'] && (is_null($value) || $value === '')) {
+                if ($field && isset($field['is_required']) && $field['is_required'] && (is_null($value) || $value === '')) {
                     throw new Exception("{$displayLabel} is required.");
                 }
 
@@ -621,7 +643,7 @@ class EmployeesController extends ApiController
                         $reportToEmployeeUniqueId = $value;
                     }
                     $answerData[$groupId][$fieldId] = $value;
-                } elseif ($field && $field['type'] === 'job_role') {
+                } elseif ($field && isset($field['type']) && $field['type'] === 'job_role') {
                     if ($value !== '' && !in_array($value, $jobRoles)) {
                         throw new Exception("Invalid job role selected: $value");
                     }
@@ -694,11 +716,17 @@ class EmployeesController extends ApiController
 
     private function findField($structure, $groupId, $fieldId)
     {
+        if (!is_array($structure)) {
+            return null;
+        }
+        
         foreach ($structure as $group) {
             if ($group['id'] == $groupId) {
-                foreach ($group['fields'] as $f) {
-                    if ($f['id'] == $fieldId || $fieldId === 'reports_to') {
-                        return $f;
+                if (isset($group['fields']) && is_array($group['fields'])) {
+                    foreach ($group['fields'] as $f) {
+                        if ($f['id'] == $fieldId || $fieldId === 'reports_to') {
+                            return $f;
+                        }
                     }
                 }
                 if (!empty($group['subGroups'])) {
@@ -900,7 +928,7 @@ class EmployeesController extends ApiController
                 ]));
         }
 
-        $company_id = $authResult->getData()->company_id;
+        $company_id = $this->getCompanyId($authResult);
         try {
             $EmployeeTemplatesTable = $this->getTable('EmployeeTemplates', $company_id);
 
@@ -924,14 +952,18 @@ class EmployeesController extends ApiController
             $headers = [];
 
             // Iterate through structure groups to find the fields
-            foreach ($structure as $group) {
-                foreach ($group['fields'] as $field) {
-                    $label = $field['label'];
-                    if (in_array($label, ['Employee ID', 'First Name', 'Last Name', 'Job Role', 'Reports To'])) {
-                        $headers[] = [
-                            'id' => $this->getFieldId($label),
-                            'label' => !empty($field['customize_field_label']) ? $field['customize_field_label'] : $field['label']
-                        ];
+            if (is_array($structure)) {
+                foreach ($structure as $group) {
+                    if (isset($group['fields']) && is_array($group['fields'])) {
+                        foreach ($group['fields'] as $field) {
+                            $label = $field['label'] ?? '';
+                            if (in_array($label, ['Employee ID', 'First Name', 'Last Name', 'Job Role', 'Reports To'])) {
+                                $headers[] = [
+                                    'id' => $this->getFieldId($label),
+                                    'label' => !empty($field['customize_field_label']) ? $field['customize_field_label'] : $field['label']
+                                ];
+                            }
+                        }
                     }
                 }
             }
@@ -996,7 +1028,7 @@ class EmployeesController extends ApiController
 
     public function getEmployeesData()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['get']);
 
         $authResult = $this->Authentication->getResult();
@@ -1010,7 +1042,7 @@ class EmployeesController extends ApiController
                 ]));
         }
 
-        $company_id = $authResult->getData()->company_id;
+        $company_id = $this->getCompanyId($authResult);
 
         // Get pagination, search, and sorting parameters
         $page = (int)($this->request->getQuery('page') ?? 1);
@@ -1174,10 +1206,14 @@ class EmployeesController extends ApiController
                 ];
 
                 $structure = is_string($employee->structure) ? json_decode($employee->structure, true) : $employee->structure;
-                $answers = is_array($employee->answers) ? $employee->answers : json_decode($employee->answers, true);
-
-                if (json_last_error() !== JSON_ERROR_NONE) {
-                    throw new \Exception('Invalid answers JSON format for employee_unique_id: ' . $employee->employee_unique_id);
+                
+                if (is_string($employee->answers)) {
+                    $answers = json_decode($employee->answers, true);
+                    if (json_last_error() !== JSON_ERROR_NONE) {
+                        throw new \Exception('Invalid answers JSON format for employee_unique_id: ' . $employee->employee_unique_id);
+                    }
+                } else {
+                    $answers = $employee->answers;
                 }
 
                 $jobRoleUniqueId = null;
@@ -1190,12 +1226,13 @@ class EmployeesController extends ApiController
 
                         foreach ($group['fields'] as $field) {
                             $fieldId = $field['id'];
-                            $fieldLabel = $field['label'];
+                            $fieldLabel = $field['label'] ?? $field['customize_field_label'] ?? '';
 
                             if (isset($fieldMapping[$fieldLabel])) {
                                 $dataKey = $fieldMapping[$fieldLabel]['dataKey'];
 
-                                foreach ($answers as $groupAnswers) {
+                                if (is_array($answers)) {
+                                    foreach ($answers as $groupAnswers) {
                                     if (isset($groupAnswers[$fieldId])) {
                                         $answerValue = $groupAnswers[$fieldId];
                                         
@@ -1206,6 +1243,7 @@ class EmployeesController extends ApiController
                                         }
                                         break;
                                     }
+                                }
                                 }
                             }
                         }
@@ -1300,7 +1338,7 @@ class EmployeesController extends ApiController
             ->withStringBody(json_encode(['success' => false, 'message' => 'Unauthorized']));
     }
 
-    $companyId = $authResult->getData()->company_id;
+    $companyId = $this->getCompanyId($authResult);
     $connection = ConnectionManager::get('client_' . $companyId);
     $EmployeeTemplatesTable = $this->getTable('EmployeeTemplates', $companyId);
 
@@ -1387,7 +1425,7 @@ class EmployeesController extends ApiController
 
     public function getEmployeeFieldsAndAnswers()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['post']);
 
         $authResult = $this->Authentication->getResult();
@@ -1401,7 +1439,7 @@ class EmployeesController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
         $data = $this->request->getData();
         $employee_unique_id = $data['employee_unique_id'] ?? null;
 
@@ -1594,7 +1632,7 @@ class EmployeesController extends ApiController
                 // It's nested, flatten it
                 foreach ($answers as $groupId => $groupAnswers) {
                     if (is_array($groupAnswers)) {
-                        $flatAnswers = array_merge($flatAnswers, $groupAnswers);
+                        $flatAnswers = $flatAnswers + $groupAnswers;
                         Log::debug('🔍 DEBUG: flattenAnswers - Flattened group', [
                             'group_id' => $groupId,
                             'group_answers' => $groupAnswers,
@@ -1694,7 +1732,7 @@ class EmployeesController extends ApiController
 
     public function deleteEmployee()
     {
-        Configure::write('debug', 1); // Consider removing in production
+        Configure::write('debug', true); // Consider removing in production
         $this->request->allowMethod(['post']);
 
         // Authentication check
@@ -1710,7 +1748,7 @@ class EmployeesController extends ApiController
         }
 
         $data = $this->request->getData();
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
         $employeeUniqueId = $data['employee_unique_id'] ?? null;
 
         // Initialize tables
@@ -1826,7 +1864,7 @@ class EmployeesController extends ApiController
 
     public function getEmployeeData()
     {
-        Configure::write('debug', 1); // Disable debug in production
+        Configure::write('debug', true); // Disable debug in production
         $this->request->allowMethod(['post']);
 
         // Authentication check
@@ -1841,7 +1879,7 @@ class EmployeesController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
         $data = $this->request->getData();
         $employeeUniqueId = $data['employee_unique_id'] ?? null;
 
@@ -1970,7 +2008,8 @@ class EmployeesController extends ApiController
             // Enhance structure and filter out Password fields
             $filteredStructure = [];
             $passwordFieldIds = [];
-            foreach ($structure as $group) {
+            if (is_array($structure)) {
+                foreach ($structure as $group) {
                 $group['customize_group_label'] = isset($group['customize_group_label']) && $group['customize_group_label'] !== ''
                     ? $group['customize_group_label']
                     : ($group['label'] ?? 'Unnamed Group');
@@ -2022,6 +2061,7 @@ class EmployeesController extends ApiController
 
                 if (!empty($group['fields']) || !empty($group['subGroups'])) {
                     $filteredStructure[] = $group;
+                }
                 }
             }
             $structure = $filteredStructure;
@@ -2208,7 +2248,7 @@ class EmployeesController extends ApiController
 
     public function updateEmployee()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['post']);
 
         // Authentication check
@@ -2223,8 +2263,8 @@ class EmployeesController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
-        $logged_username = $authResult->getData()->username;
+        $companyId = $this->getCompanyId($authResult);
+        $logged_username = $this->getUsername($authResult);
         $data = $this->request->getData();
         $employeeUniqueId = $data['employee_unique_id'] ?? null;
         
@@ -2325,7 +2365,7 @@ class EmployeesController extends ApiController
             error_log("Data: " . json_encode($oldAnswers, JSON_PRETTY_PRINT));
 
             // Update existing answers
-            $existingAnswer->answers = array_replace_recursive($existingAnswer->answers, $answerData);
+            $existingAnswer->answers = array_replace_recursive($oldAnswers, $answerData);
             $existingAnswer->employee_id = $employeeId;
             $existingAnswer->username = $username;
             $existingAnswer->report_to_employee_unique_id = $reportToEmployeeUniqueId;
@@ -2523,7 +2563,7 @@ class EmployeesController extends ApiController
 
     public function updateUploadFiles()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['post']);
 
         // Authentication check
@@ -2538,7 +2578,7 @@ class EmployeesController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
         $data = $this->request->getData();
         $answerId = $data['answerId'] ?? null;
         $employeeUniqueId = $data['employee_unique_id'] ?? null;
@@ -2739,7 +2779,7 @@ class EmployeesController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
         $data = $this->request->getData();
         $employeeUniqueId = $data['employee_unique_id'] ?? null;
 
@@ -2879,7 +2919,7 @@ class EmployeesController extends ApiController
 
     public function changePassword()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['post']);
 
         // Authentication check
@@ -2894,8 +2934,8 @@ class EmployeesController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
-        $logged_username = $authResult->getData()->username;
+        $companyId = $this->getCompanyId($authResult);
+        $logged_username = $this->getUsername($authResult);
         $data = $this->request->getData();
 
         $userId = $data['userId'] ?? null;
@@ -3101,7 +3141,7 @@ class EmployeesController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
+        $companyId = $this->getCompanyId($authResult);
 
         try {
             // Get job roles with their reporting relationships
@@ -3321,5 +3361,69 @@ class EmployeesController extends ApiController
         }
         
         return $fieldMapping;
+    }
+
+    /**
+     * Helper method to extract company_id from authentication result
+     */
+    private function getCompanyId($authResult)
+    {
+        $data = $authResult->getData();
+        
+        // Handle both ArrayObject and stdClass
+        if (is_object($data)) {
+            if (isset($data->company_id)) {
+                return $data->company_id;
+            }
+            // Convert to array if needed
+            $data = (array) $data;
+        }
+        
+        if (is_array($data) && isset($data['company_id'])) {
+            return $data['company_id'];
+        }
+        
+        // Fallback: try to get from JWT payload
+        if (method_exists($authResult, 'getPayload')) {
+            $payload = $authResult->getPayload();
+            if (isset($payload['company_id'])) {
+                return $payload['company_id'];
+            }
+        }
+        
+        // Default fallback
+        return '200001'; // Default company ID
+    }
+
+    /**
+     * Helper method to extract username from authentication result
+     */
+    private function getUsername($authResult)
+    {
+        $data = $authResult->getData();
+        
+        // Handle both ArrayObject and stdClass
+        if (is_object($data)) {
+            if (isset($data->username)) {
+                return $data->username;
+            }
+            // Convert to array if needed
+            $data = (array) $data;
+        }
+        
+        if (is_array($data) && isset($data['username'])) {
+            return $data['username'];
+        }
+        
+        // Fallback: try to get from JWT payload
+        if (method_exists($authResult, 'getPayload')) {
+            $payload = $authResult->getPayload();
+            if (isset($payload['sub'])) {
+                return $payload['sub'];
+            }
+        }
+        
+        // Default fallback
+        return 'unknown'; // Default username
     }
 }

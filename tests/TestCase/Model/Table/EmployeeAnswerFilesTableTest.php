@@ -25,7 +25,6 @@ class EmployeeAnswerFilesTableTest extends TestCase
      */
     protected array $fixtures = [
         'app.EmployeeAnswerFiles',
-        'app.Answers',
     ];
 
     /**

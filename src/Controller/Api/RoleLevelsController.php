@@ -39,10 +39,9 @@ class RoleLevelsController extends ApiController
                     'message' => 'Unauthorized access',
                 ]));
         }
-        debug($authResult->getData());
-        die('test data');
+        
 
-        $company_id = $authResult->getData()->company_id;
+        $company_id = $this->getCompanyId($authResult);
         try {
             $LevelTemplatesTable = $this->getTable('LevelTemplates', $company_id);
 
@@ -62,7 +61,13 @@ class RoleLevelsController extends ApiController
             }
 
             // Process the structure to extract required fields
-            $structure = json_decode(json_encode($template->structure), true); // Convert to array
+            $structure = $template->structure;
+            if (is_string($structure)) {
+                $structure = json_decode($structure, true);
+            }
+            if (!is_array($structure)) {
+                $structure = [];
+            }
             $headers = [];
 
             // Iterate through structure groups to find the fields
@@ -151,7 +156,7 @@ class RoleLevelsController extends ApiController
                 ]));
         }
 
-        $company_id = $authResult->getData()->company_id;
+        $company_id = $this->getCompanyId($authResult);
         $data = $this->request->getData();
 
         try {
@@ -206,8 +211,22 @@ class RoleLevelsController extends ApiController
             $results = [];
 
             foreach ($records as $row) {
-                $structure = json_decode(json_encode($row->structure), true);
-                $answers = json_decode($row->answers, true);
+                $structure = $row->structure;
+                if (is_string($structure)) {
+                    $structure = json_decode($structure, true);
+                }
+                if (!is_array($structure)) {
+                    $structure = [];
+                }
+                
+                $answers = $row->answers;
+                if (is_string($answers)) {
+                    $answers = json_decode($answers, true);
+                }
+                if (!is_array($answers)) {
+                    $answers = [];
+                }
+                
                 $fields = [];
 
                 foreach ($structure as $group) {
@@ -306,7 +325,7 @@ class RoleLevelsController extends ApiController
 
     public function addRoleLevel()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['post']);
 
         $authResult = $this->Authentication->getResult();
@@ -319,8 +338,14 @@ class RoleLevelsController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
-        $username = $authResult->getData()->username;
+        $companyId = $this->getCompanyId($authResult);
+        $authData = $authResult->getData();
+        $username = null;
+        if ($authData instanceof \ArrayObject || is_array($authData)) {
+            $username = $authData['username'] ?? $authData['sub'] ?? null;
+        } elseif (is_object($authData)) {
+            $username = $authData->username ?? $authData->sub ?? null;
+        }
 
         $data = $this->request->getData();
 
@@ -361,7 +386,10 @@ class RoleLevelsController extends ApiController
 
             // Validate template structure
             $structure = $template->structure;
-            if (json_last_error() !== JSON_ERROR_NONE) {
+            if (is_string($structure)) {
+                $structure = json_decode($structure, true);
+            }
+            if (!is_array($structure)) {
                 throw new BadRequestException('Invalid template structure.');
             }
 
@@ -375,16 +403,16 @@ class RoleLevelsController extends ApiController
                     $fieldId = (string)$field['id'];
                     $fieldLabel = $field['label'];
 
-                    if ($fieldLabel === 'Level') {
+                    if ($fieldId === 'level_name') {
                         $submitted = $answers[$groupId][$fieldId] ?? null;
-                        if (!empty($submitted)) {
+                        if (!empty($submitted) && is_string($submitted)) {
                             $level = $submitted;
                         }
                     }
 
-                    if ($fieldLabel === 'Rank/Order') {
+                    if ($fieldId === 'rank') {
                         $submitted = $answers[$groupId][$fieldId] ?? null;
-                        if (!empty($submitted)) {
+                        if (!empty($submitted) && (is_numeric($submitted) || is_string($submitted))) {
                             $rank = $submitted;
                         }
                     }
@@ -406,6 +434,10 @@ class RoleLevelsController extends ApiController
                 }
             }
 
+            // Sanitize input data to prevent XSS
+            $level = htmlspecialchars($level, ENT_QUOTES, 'UTF-8');
+            $answers = $this->sanitizeArray($answers);
+
             // Create new level
             $level = $RoleLevelsTable->newEntity([
                 'company_id' => $companyId,
@@ -420,7 +452,17 @@ class RoleLevelsController extends ApiController
                 'modified' => date('Y-m-d H:i:s'),
             ]);
 
+            // Debug: Check entity errors
+            if ($level->hasErrors()) {
+                Log::error('RoleLevel entity validation errors', ['errors' => $level->getErrors()]);
+                throw new Exception('Failed to save level.');
+            }
+
             if (!$RoleLevelsTable->save($level)) {
+                Log::error('Failed to save RoleLevel', [
+                    'entity_errors' => $level->getErrors(),
+                    'entity_data' => $level->toArray()
+                ]);
                 throw new Exception('Failed to save level.');
             }
 
@@ -521,7 +563,7 @@ class RoleLevelsController extends ApiController
     }
 
     $data = $this->request->getData();
-    $companyId = $authResult->getData()->company_id ?? null;
+        $companyId = $this->getCompanyId($authResult);
     $roleLevelId = $data['role_level_id'] ?? null;
 
     if (empty($roleLevelId)) {
@@ -625,7 +667,7 @@ class RoleLevelsController extends ApiController
                 ]));
         }
 
-        $company_id = $authResult->getData()->company_id;
+        $company_id = $this->getCompanyId($authResult);
         $data = $this->request->getData();
 
         if (empty($data['level_unique_id'])) {
@@ -678,6 +720,12 @@ class RoleLevelsController extends ApiController
             }
 
             $structure = $record->structure;
+            if (is_string($structure)) {
+                $structure = json_decode($structure, true);
+            }
+            if (!is_array($structure)) {
+                $structure = [];
+            }
             $answers = json_decode($record->answers, true) ?: [];
             $fields = [];
 
@@ -734,7 +782,7 @@ class RoleLevelsController extends ApiController
                 ]));
         }
 
-        $company_id = $authResult->getData()->company_id;
+        $company_id = $this->getCompanyId($authResult);
         $data = $this->request->getData();
 
         if (empty($data['level_unique_id'])) {
@@ -788,6 +836,12 @@ class RoleLevelsController extends ApiController
             }
 
             $structure = $record->structure;
+            if (is_string($structure)) {
+                $structure = json_decode($structure, true);
+            }
+            if (!is_array($structure)) {
+                $structure = [];
+            }
             $answers = json_decode($record->answers, true);
             $fieldsById = [];
 
@@ -829,7 +883,7 @@ class RoleLevelsController extends ApiController
 
     public function updateRoleLevel()
     {
-        Configure::write('debug', 1);
+        Configure::write('debug', true);
         $this->request->allowMethod(['post']);
 
         // Authenticate user
@@ -843,8 +897,14 @@ class RoleLevelsController extends ApiController
                 ]));
         }
 
-        $companyId = $authResult->getData()->company_id;
-        $username = $authResult->getData()->username;
+        $companyId = $this->getCompanyId($authResult);
+        $authData = $authResult->getData();
+        $username = null;
+        if ($authData instanceof \ArrayObject || is_array($authData)) {
+            $username = $authData['username'] ?? $authData['sub'] ?? null;
+        } elseif (is_object($authData)) {
+            $username = $authData->username ?? $authData->sub ?? null;
+        }
 
         $data = $this->request->getData();
         $templateId = $data['template_id'] ?? null;
@@ -878,7 +938,12 @@ class RoleLevelsController extends ApiController
                 ->first();
 
             if (!$project) {
-                throw new BadRequestException('Invalid level ID.');
+                return $this->response->withStatus(404)
+                    ->withType('application/json')
+                    ->withStringBody(json_encode([
+                        'success' => false,
+                        'message' => 'Level not found',
+                    ]));
             }
 
             // Verify template exists
@@ -896,7 +961,10 @@ class RoleLevelsController extends ApiController
 
             // Validate template structure
             $structure = $template->structure;
-            if (json_last_error() !== JSON_ERROR_NONE) {
+            if (is_string($structure)) {
+                $structure = json_decode($structure, true);
+            }
+            if (!is_array($structure)) {
                 throw new BadRequestException('Invalid template structure.');
             }
 
@@ -1120,5 +1188,39 @@ class RoleLevelsController extends ApiController
         }
         
         return $fieldMapping;
+    }
+
+    private function getCompanyId($authResult)
+    {
+        $authData = $authResult->getData();
+
+        // Handle both ArrayObject and stdClass
+        if ($authData instanceof \ArrayObject || is_array($authData)) {
+            return $authData['company_id'] ?? null;
+        } elseif (is_object($authData)) {
+            return $authData->company_id ?? null;
+        }
+
+        return null;
+    }
+
+    /**
+     * Recursively sanitize array data to prevent XSS attacks
+     */
+    private function sanitizeArray($data)
+    {
+        if (is_array($data)) {
+            return array_map([$this, 'sanitizeArray'], $data);
+        } elseif (is_string($data)) {
+            return htmlspecialchars($data, ENT_QUOTES, 'UTF-8');
+        } elseif (is_object($data)) {
+            // Convert object to array and sanitize
+            return $this->sanitizeArray((array)$data);
+        } elseif (is_numeric($data) || is_bool($data) || is_null($data)) {
+            // Keep numeric, boolean, and null values as-is
+            return $data;
+        }
+        // For any other type, convert to string and sanitize
+        return htmlspecialchars((string)$data, ENT_QUOTES, 'UTF-8');
     }
 }

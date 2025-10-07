@@ -82,7 +82,8 @@ class UsersController extends ApiController
         $user = $usersTable->find()
             ->where(['username' => $data['username']])
             ->first();
-
+        
+    
     
         // Check if user exists and password is correct
         if (!$user || !password_verify($data['password'], $user->password)) {
@@ -103,7 +104,7 @@ class UsersController extends ApiController
                 'first_name' => $user->first_name,
                 'last_name' => $user->last_name,
                 'email' => $user->email_address,
-                'system_user_role' => $user->system_user_role
+                'user_role' => $user->system_user_role
             ],
             'success' => true
         ]));
