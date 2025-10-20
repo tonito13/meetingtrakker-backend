@@ -70,3 +70,5 @@ node_modules/
 # Temporary files
 *.tmp
 *.tempconfig/datasources.php
+
+config/datasources.php
