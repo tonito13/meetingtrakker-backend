@@ -69,4 +69,4 @@ node_modules/
 
 # Temporary files
 *.tmp
-*.temp
+*.tempconfig/datasources.php
