@@ -175,14 +175,17 @@ class ApiController extends Controller
         if (is_array($user) || $user instanceof \ArrayObject) {
             $userId = $user['sub'] ?? null;
             $companyId = $user['company_id'] ?? null;
+            $systemUserRole = $user['system_user_role'] ?? null;
         } else {
             $userId = $user->id ?? null;
             $companyId = $user->company_id ?? null;
+            $systemUserRole = $user->system_user_role ?? null;
         }
 
         $payload = [
             'sub' => $userId,
             'company_id' => $companyId,
+            'system_user_role' => $systemUserRole,
             'exp' => time() + 28800,
             'iat' => $issuedAt,
         ];

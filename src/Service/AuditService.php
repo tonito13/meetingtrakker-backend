@@ -25,13 +25,41 @@ class AuditService
     {
         $this->companyId = $companyId;
         
+        // Get company-specific database connection
+        $connection = $this->getConnection($companyId);
+        
         // Get table locator
         $locator = TableRegistry::getTableLocator();
         
-        // Always use existing tables if they're already loaded (e.g., in test environment)
-        // This prevents "You cannot configure X, it already exists in the registry" errors
-        $this->auditLogsTable = $locator->get('AuditLogs');
-        $this->auditLogDetailsTable = $locator->get('AuditLogDetails');
+        // Get table instances directly with the specific connection
+        // Use the standard table names but ensure they use the correct connection
+        // Clear any existing instances to avoid conflicts
+        try {
+            $locator->remove('AuditLogs');
+        } catch (\Exception $e) {
+            // Table might not exist, that's okay
+        }
+        
+        try {
+            $locator->remove('AuditLogDetails');
+        } catch (\Exception $e) {
+            // Table might not exist, that's okay
+        }
+        
+        // Get table instances with the specific connection
+        $this->auditLogsTable = $locator->get('AuditLogs', [
+            'connection' => $connection
+        ]);
+        
+        $this->auditLogDetailsTable = $locator->get('AuditLogDetails', [
+            'connection' => $connection
+        ]);
+        
+        // Configure the association to use the correct table instance
+        $association = $this->auditLogsTable->getAssociation('AuditLogDetails');
+        if ($association) {
+            $association->setTarget($this->auditLogDetailsTable);
+        }
     }
 
     /**

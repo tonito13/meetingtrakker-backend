@@ -137,7 +137,8 @@ class AuditLogsTable extends Table
      */
     public function findFiltered(Query $query, array $options): Query
     {
-        $query = $query->contain(['AuditLogDetails']);
+        // Note: contain() removed to avoid association connection issues
+        // Details will be loaded separately if needed
 
         // Filter by company
         if (!empty($options['company_id'])) {

@@ -323,6 +323,75 @@ class RoleLevelsController extends ApiController
         }
     }
 
+    /**
+     * Check for rank conflicts in role levels
+     * 
+     * @return \Cake\Http\Response
+     */
+    public function checkRankConflicts()
+    {
+        $this->request->allowMethod(['get']);
+
+        $authResult = $this->Authentication->getResult();
+        if (!$authResult || !$authResult->isValid()) {
+            return $this->response
+                ->withStatus(401)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Unauthorized access',
+                ]));
+        }
+
+        $companyId = $this->getCompanyId($authResult);
+
+        try {
+            $RoleLevelsTable = $this->getTable('RoleLevels', $companyId);
+            $connection = $RoleLevelsTable->getConnection();
+
+            // Find ranks that have duplicates (more than one role level with the same rank)
+            $sql = "
+                SELECT rank, COUNT(*) as count, 
+                       STRING_AGG(level_unique_id, ', ' ORDER BY level_unique_id) as level_unique_ids,
+                       STRING_AGG(name, ', ' ORDER BY level_unique_id) as names
+                FROM role_levels 
+                WHERE company_id = :company_id AND deleted = false AND rank IS NOT NULL
+                GROUP BY rank
+                HAVING COUNT(*) > 1
+                ORDER BY rank
+            ";
+
+            $stmt = $connection->execute($sql, ['company_id' => $companyId]);
+            $conflicts = [];
+            foreach ($stmt->fetchAll('assoc') as $row) {
+                $conflicts[] = [
+                    'rank' => (int)$row['rank'],
+                    'count' => (int)$row['count'],
+                    'level_unique_ids' => explode(', ', $row['level_unique_ids']),
+                    'names' => explode(', ', $row['names']),
+                ];
+            }
+
+            return $this->response
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => true,
+                    'has_conflicts' => count($conflicts) > 0,
+                    'conflicts' => $conflicts,
+                    'conflict_count' => count($conflicts),
+                ]));
+        } catch (\Exception $e) {
+            Log::error('Error checking rank conflicts: ' . $e->getMessage(), ['company_id' => $companyId]);
+            return $this->response
+                ->withStatus(500)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Error checking rank conflicts: ' . $e->getMessage(),
+                ]));
+        }
+    }
+
     public function addRoleLevel()
     {
         Configure::write('debug', true);
@@ -403,14 +472,15 @@ class RoleLevelsController extends ApiController
                     $fieldId = (string)$field['id'];
                     $fieldLabel = $field['label'];
 
-                    if ($fieldId === 'level_name') {
+                    // Match by label instead of ID to work with dynamic templates
+                    if ($fieldLabel === 'Level') {
                         $submitted = $answers[$groupId][$fieldId] ?? null;
                         if (!empty($submitted) && is_string($submitted)) {
                             $level = $submitted;
                         }
                     }
 
-                    if ($fieldId === 'rank') {
+                    if ($fieldLabel === 'Rank/Order') {
                         $submitted = $answers[$groupId][$fieldId] ?? null;
                         if (!empty($submitted) && (is_numeric($submitted) || is_string($submitted))) {
                             $rank = $submitted;
@@ -419,20 +489,7 @@ class RoleLevelsController extends ApiController
                 }
             }
 
-            // Check if rank already exists
-            if (!empty($rank)) {
-                $existingRank = $RoleLevelsTable->find()
-                    ->where([
-                        'company_id' => $companyId,
-                        'rank' => $rank,
-                        'deleted' => 0
-                    ])
-                    ->first();
-
-                if ($existingRank) {
-                    throw new Exception("Rank '{$rank}' already exists. Please choose a different rank.");
-                }
-            }
+            // Note: Duplicate ranks are now allowed, but we'll warn about conflicts via the frontend
 
             // Sanitize input data to prevent XSS
             $level = htmlspecialchars($level, ENT_QUOTES, 'UTF-8');
