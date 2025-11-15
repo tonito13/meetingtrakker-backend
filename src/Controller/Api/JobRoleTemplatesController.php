@@ -33,6 +33,12 @@ class JobRoleTemplatesController extends ApiController
             ]));
         }
 
+        // Require admin access for template management
+        $adminCheck = $this->requireAdminForTemplates();
+        if ($adminCheck !== null) {
+            return $adminCheck;
+        }
+
         $data = $this->request->getData();
         $company_id = $this->getCompanyId($authResult);
         $jobRoleTemplatesTable = $this->getTable('JobRoleTemplates', $company_id);
@@ -72,6 +78,12 @@ class JobRoleTemplatesController extends ApiController
                     'success' => false,
                     'message' => 'Unauthorized access',
                 ]));
+        }
+
+        // Require admin access for template management
+        $adminCheck = $this->requireAdminForTemplates();
+        if ($adminCheck !== null) {
+            return $adminCheck;
         }
 
         try {

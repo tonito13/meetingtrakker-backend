@@ -21,6 +21,115 @@ class ScorecardsController extends ApiController
     }
 
     /**
+     * Get username from authentication result
+     * Handles both object and array formats
+     * Falls back to querying Users table if username not in token
+     * 
+     * @param object $authResult Authentication result
+     * @return string Username or 'system' as fallback
+     */
+    private function getUsername($authResult)
+    {
+        $authData = $authResult->getData();
+        $username = null;
+        $userId = null;
+        
+        // Log the structure of authData for debugging
+        Log::debug('🔍 DEBUG: getUsername - authData structure', [
+            'auth_data_type' => gettype($authData),
+            'auth_data_class' => is_object($authData) ? get_class($authData) : null,
+            'auth_data_keys' => is_array($authData) ? array_keys($authData) : (is_object($authData) ? array_keys(get_object_vars($authData)) : []),
+            'auth_data_sample' => is_object($authData) ? (array)$authData : $authData
+        ]);
+        
+        // JWT authenticator with returnPayload => true returns the payload directly
+        // The payload should contain: sub, username, company_id, system_user_role
+        if (is_object($authData)) {
+            // Handle stdClass (JWT decode returns stdClass)
+            $username = $authData->username ?? null;
+            $userId = $authData->sub ?? $authData->id ?? null;
+            
+            // Convert to array for easier access
+            if (!$username) {
+                $authData = (array) $authData;
+            }
+        }
+        
+        if (!$username && is_array($authData)) {
+            $username = $authData['username'] ?? null;
+            $userId = $authData['sub'] ?? $authData['id'] ?? null;
+        }
+        
+        // If still not found, try to get from JWT payload method (fallback)
+        if (!$username && method_exists($authResult, 'getPayload')) {
+            try {
+                $payload = $authResult->getPayload();
+                if (isset($payload['username'])) {
+                    $username = $payload['username'];
+                } elseif (isset($payload['sub'])) {
+                    $userId = $payload['sub'];
+                }
+            } catch (\Exception $e) {
+                Log::debug('🔍 DEBUG: Could not get payload from auth result: ' . $e->getMessage());
+            }
+        }
+        
+        // If username still not found but we have userId, query Users table
+        // Users table is in the workmatica database (default connection)
+        // Query by userId only (it's unique), not by company_id, since users may have different company_ids
+        if (!$username && $userId) {
+            try {
+                // Use default connection (workmatica database) for Users table
+                $UsersTable = $this->getTable('Users', 'default');
+                
+                // Query by userId only (unique), not by company_id
+                // Users can have different company_ids (original orgtrakker company_id vs mapped scorecardtrakker company_id)
+                $user = $UsersTable->find()
+                    ->where([
+                        'id' => $userId,
+                        'deleted' => false
+                    ])
+                    ->first();
+                
+                if ($user && !empty($user->username)) {
+                    $username = $user->username;
+                    Log::debug('🔍 DEBUG: Username retrieved from Users table', [
+                        'user_id' => $userId,
+                        'username' => $username,
+                        'user_company_id' => $user->company_id ?? null
+                    ]);
+                } else {
+                    Log::warning('🔍 DEBUG: User not found in Users table', [
+                        'user_id' => $userId
+                    ]);
+                }
+            } catch (\Exception $e) {
+                Log::error('🔍 DEBUG: Error querying Users table for username: ' . $e->getMessage(), [
+                    'user_id' => $userId,
+                    'trace' => $e->getTraceAsString()
+                ]);
+            }
+        }
+        
+        if (!$username) {
+            Log::error('🔍 DEBUG: Unable to extract username from auth result, using fallback', [
+                'auth_data_type' => gettype($authData),
+                'auth_data_keys' => is_array($authData) ? array_keys($authData) : (is_object($authData) ? array_keys(get_object_vars($authData)) : []),
+                'user_id' => $userId,
+                'auth_data_full' => is_object($authData) ? (array)$authData : $authData
+            ]);
+            return 'system';
+        }
+        
+        Log::debug('🔍 DEBUG: getUsername - Successfully extracted username', [
+            'username' => $username,
+            'user_id' => $userId
+        ]);
+        
+        return $username;
+    }
+
+    /**
      * Get table headers for scorecards based on template structure
      */
     public function tableHeaders()
@@ -197,8 +306,10 @@ class ScorecardsController extends ApiController
         }
 
         $company_id = $this->getCompanyId($authResult);
-        $authData = $authResult->getData();
-        $currentUsername = $authData->username ?? 'system';
+        $currentUsername = $this->getUsername($authResult);
+        
+        // Check if user is admin
+        $isAdmin = $this->isAdmin();
 
         // Get pagination, search, and sorting parameters
         $page = (int)($this->request->getQuery('page') ?? 1);
@@ -275,6 +386,28 @@ class ScorecardsController extends ApiController
                     'ScorecardTemplates.deleted' => 0,
                     'scorecard_template_answers.scorecard_unique_id IS NOT' => null,
                 ]);
+            
+            // For non-admin users, filter to only show scorecards they created
+            // Also exclude scorecards created by "system" to prevent showing system-created scorecards
+            if (!$isAdmin) {
+                $query->andWhere([
+                    'scorecard_template_answers.created_by' => $currentUsername,
+                    'scorecard_template_answers.created_by IS NOT' => null
+                ])->andWhere(['scorecard_template_answers.created_by !=' => 'system']);
+                Log::debug('🔍 DEBUG: getScorecardsData - Filtering by created_by for non-admin user', [
+                    'current_username' => $currentUsername,
+                    'is_admin' => false,
+                    'filter_conditions' => [
+                        'created_by' => $currentUsername,
+                        'created_by IS NOT NULL',
+                        'created_by != system'
+                    ]
+                ]);
+            } else {
+                Log::debug('🔍 DEBUG: getScorecardsData - Admin user - showing all scorecards', [
+                    'is_admin' => true
+                ]);
+            }
 
             // Get all data first for search and sorting (since we need to process JSON)
             $allScorecardAnswers = $query->all()->toArray();
@@ -512,8 +645,12 @@ class ScorecardsController extends ApiController
             $connection->begin();
 
             // Get current user's username for assignment and creation tracking
-            $authData = $authResult->getData();
-            $currentUsername = $authData->username ?? 'system';
+            $currentUsername = $this->getUsername($authResult);
+            
+            Log::debug('🔍 DEBUG: addScorecard - Username extracted', [
+                'current_username' => $currentUsername,
+                'will_be_used_for' => ['assigned_employee_username', 'created_by']
+            ]);
             
             // Save answers with assigned employee (current user) and created_by
             $answerEntity = $this->saveScorecardAnswers($companyId, $scorecardUniqueId, $data['template_id'], $answers, $currentUsername, $currentUsername);
@@ -1042,6 +1179,12 @@ class ScorecardsController extends ApiController
                     // Validate that the employee exists (by username)
                     $this->validateEmployeeExistsByUsername($companyId, $childData['assigned_employee_username']);
 
+                    // For non-admin users, validate that the assigned employee reports to them
+                    $isAdmin = $this->isAdmin();
+                    if (!$isAdmin) {
+                        $this->validateEmployeeReportsToUser($companyId, $childData['assigned_employee_username'], $authResult);
+                    }
+
                     // Parse and validate answers (EXACT same as addScorecard)
                     $answers = $this->parseAnswers($childData['answers']);
                     $template = $this->validateTemplate($companyId, $templateId);
@@ -1053,8 +1196,7 @@ class ScorecardsController extends ApiController
                     $scorecardUniqueId = $this->generateScorecardUniqueId();
 
                     // Get current user's username for created_by tracking
-                    $authData = $authResult->getData();
-                    $currentUsername = $authData->username ?? 'system';
+                    $currentUsername = $this->getUsername($authResult);
 
                     // Save answers with assigned employee and parent (modified saveScorecardAnswers)
                     $answerEntity = $this->saveScorecardAnswersWithParent(
@@ -1234,6 +1376,148 @@ class ScorecardsController extends ApiController
         if (!$employee) {
             throw new Exception("Employee with username '{$username}' not found.");
         }
+    }
+
+    /**
+     * Validate that the assigned employee reports to the logged-in user
+     * @param int $companyId
+     * @param string $assignedEmployeeUsername
+     * @param object $authResult
+     * @throws Exception if employee does not report to logged-in user
+     */
+    private function validateEmployeeReportsToUser($companyId, $assignedEmployeeUsername, $authResult)
+    {
+        // Get logged-in user's username
+        $loggedUsername = $this->getUsername($authResult);
+        
+        if ($loggedUsername === 'system') {
+            throw new Exception('Unable to determine logged-in user.');
+        }
+        
+        // Get logged-in user's employee_unique_id
+        $EmployeeTemplateAnswersTable = $this->getTable('EmployeeTemplateAnswers', $companyId);
+        $EmployeeTemplatesTable = $this->getTable('EmployeeTemplates', $companyId);
+        
+        $loggedUserEmployee = $EmployeeTemplatesTable
+            ->find()
+            ->select([
+                'employee_unique_id' => 'employee_template_answers.employee_unique_id',
+                'template_structure' => 'EmployeeTemplates.structure',
+                'answers' => 'employee_template_answers.answers',
+            ])
+            ->join([
+                'employee_template_answers' => [
+                    'table' => 'employee_template_answers',
+                    'type' => 'INNER',
+                    'conditions' => [
+                        'employee_template_answers.company_id = EmployeeTemplates.company_id',
+                        'employee_template_answers.deleted' => 0,
+                    ]
+                ],
+            ])
+            ->where([
+                'EmployeeTemplates.company_id' => $companyId,
+                'EmployeeTemplates.deleted' => 0,
+                'employee_template_answers.username' => $loggedUsername,
+                'employee_template_answers.employee_unique_id IS NOT NULL',
+            ])
+            ->first();
+        
+        if (!$loggedUserEmployee || !$loggedUserEmployee->employee_unique_id) {
+            throw new Exception('Logged-in user not found in employee records.');
+        }
+        
+        $loggedUserEmployeeUniqueId = $loggedUserEmployee->employee_unique_id;
+        
+        // Get assigned employee's record and check their reports_to field
+        $assignedEmployee = $EmployeeTemplatesTable
+            ->find()
+            ->select([
+                'employee_unique_id' => 'employee_template_answers.employee_unique_id',
+                'template_structure' => 'EmployeeTemplates.structure',
+                'answers' => 'employee_template_answers.answers',
+            ])
+            ->join([
+                'employee_template_answers' => [
+                    'table' => 'employee_template_answers',
+                    'type' => 'INNER',
+                    'conditions' => [
+                        'employee_template_answers.company_id = EmployeeTemplates.company_id',
+                        'employee_template_answers.deleted' => 0,
+                    ]
+                ],
+            ])
+            ->where([
+                'EmployeeTemplates.company_id' => $companyId,
+                'EmployeeTemplates.deleted' => 0,
+                'employee_template_answers.username' => $assignedEmployeeUsername,
+                'employee_template_answers.employee_unique_id IS NOT NULL',
+            ])
+            ->first();
+        
+        if (!$assignedEmployee) {
+            throw new Exception("Assigned employee with username '{$assignedEmployeeUsername}' not found.");
+        }
+        
+        // Parse the assigned employee's answers to find reports_to
+        $assignedEmployeeAnswers = is_string($assignedEmployee->answers) 
+            ? json_decode($assignedEmployee->answers, true) 
+            : $assignedEmployee->answers;
+        
+        $assignedEmployeeStructure = is_string($assignedEmployee->template_structure)
+            ? json_decode($assignedEmployee->template_structure, true)
+            : $assignedEmployee->template_structure;
+        
+        // Find the reports_to field value
+        $assignedEmployeeReportsTo = null;
+        if (is_array($assignedEmployeeStructure) && is_array($assignedEmployeeAnswers)) {
+            foreach ($assignedEmployeeStructure as $group) {
+                $groupId = $group['id'] ?? null;
+                if (isset($group['fields']) && is_array($group['fields'])) {
+                    foreach ($group['fields'] as $field) {
+                        $fieldLabel = $field['label'] ?? $field['customize_field_label'] ?? '';
+                        if (strcasecmp($fieldLabel, 'Reports To') === 0) {
+                            $fieldId = $field['id'] ?? null;
+                            if ($groupId && $fieldId && isset($assignedEmployeeAnswers[$groupId][$fieldId])) {
+                                $assignedEmployeeReportsTo = $assignedEmployeeAnswers[$groupId][$fieldId];
+                                break 2;
+                            }
+                        }
+                    }
+                }
+                
+                // Check subgroups
+                if (isset($group['subGroups']) && is_array($group['subGroups'])) {
+                    foreach ($group['subGroups'] as $subGroup) {
+                        $subGroupId = $subGroup['id'] ?? $groupId;
+                        if (isset($subGroup['fields']) && is_array($subGroup['fields'])) {
+                            foreach ($subGroup['fields'] as $field) {
+                                $fieldLabel = $field['label'] ?? $field['customize_field_label'] ?? '';
+                                if (strcasecmp($fieldLabel, 'Reports To') === 0) {
+                                    $fieldId = $field['id'] ?? null;
+                                    if ($subGroupId && $fieldId && isset($assignedEmployeeAnswers[$subGroupId][$fieldId])) {
+                                        $assignedEmployeeReportsTo = $assignedEmployeeAnswers[$subGroupId][$fieldId];
+                                        break 3;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Validate that the assigned employee reports to the logged-in user
+        if ($assignedEmployeeReportsTo !== $loggedUserEmployeeUniqueId) {
+            throw new Exception("You can only assign scorecards to employees that report to you.");
+        }
+        
+        Log::debug('🔍 DEBUG: validateEmployeeReportsToUser - Validation passed', [
+            'logged_username' => $loggedUsername,
+            'logged_user_employee_unique_id' => $loggedUserEmployeeUniqueId,
+            'assigned_employee_username' => $assignedEmployeeUsername,
+            'assigned_employee_reports_to' => $assignedEmployeeReportsTo
+        ]);
     }
 
 
@@ -1445,8 +1729,7 @@ class ScorecardsController extends ApiController
         }
 
         $companyId = $this->getCompanyId($authResult);
-        $authData = $authResult->getData();
-        $currentUsername = $authData->username ?? 'system';
+        $currentUsername = $this->getUsername($authResult);
 
         // Get request parameters
         $page = (int)($this->request->getQuery('page', 1));
@@ -1702,8 +1985,7 @@ class ScorecardsController extends ApiController
         }
 
         $companyId = $this->getCompanyId($authResult);
-        $authData = $authResult->getData();
-        $currentUsername = $authData->username ?? 'system';
+        $currentUsername = $this->getUsername($authResult);
 
         // Get request parameters
         $page = (int)($this->request->getQuery('page', 1));
@@ -2183,6 +2465,331 @@ class ScorecardsController extends ApiController
     }
 
     /**
+     * Get scorecard data by answer_id (for fetching parent scorecards)
+     * @return \Cake\Http\Response
+     */
+    public function getScorecardByAnswerId()
+    {
+        Configure::write('debug', true);
+        $this->request->allowMethod(['post']);
+
+        // Authentication check
+        $authResult = $this->Authentication->getResult();
+        if (!$authResult || !$authResult->isValid()) {
+            return $this->response
+                ->withStatus(401)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Unauthorized access'
+                ]));
+        }
+
+        $data = $this->request->getData();
+        $companyId = $this->getCompanyId($authResult);
+        $answerId = $data['answer_id'] ?? null;
+
+        // Validation
+        if (empty($answerId)) {
+            return $this->response
+                ->withStatus(400)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Missing answer ID'
+                ]));
+        }
+
+        try {
+            $ScorecardTemplateAnswersTable = $this->getTable('ScorecardTemplateAnswers', $companyId);
+            $ScorecardTemplatesTable = $this->getTable('ScorecardTemplates', $companyId);
+
+            // Get scorecard data by id (answer_id)
+            $scorecard = $ScorecardTemplateAnswersTable->find()
+                ->where([
+                    'company_id' => $companyId,
+                    'deleted' => 0,
+                    'id' => $answerId
+                ])
+                ->first();
+
+            if (!$scorecard) {
+                return $this->response
+                    ->withStatus(404)
+                    ->withType('application/json')
+                    ->withStringBody(json_encode([
+                        'success' => false,
+                        'message' => 'Scorecard not found'
+                    ]));
+            }
+
+            // Get template structure
+            $template = $ScorecardTemplatesTable->find()
+                ->where([
+                    'id' => $scorecard->template_id,
+                    'company_id' => $companyId,
+                    'deleted' => 0
+                ])
+                ->first();
+
+            if (!$template) {
+                return $this->response
+                    ->withStatus(404)
+                    ->withType('application/json')
+                    ->withStringBody(json_encode([
+                        'success' => false,
+                        'message' => 'Template not found'
+                    ]));
+            }
+
+            // Parse answers
+            $rawAnswers = [];
+            if (!empty($scorecard->answers)) {
+                if (is_string($scorecard->answers)) {
+                    $rawAnswers = json_decode($scorecard->answers, true) ?: [];
+                } elseif (is_array($scorecard->answers)) {
+                    $rawAnswers = $scorecard->answers;
+                }
+            }
+
+            // Convert flat structure to nested structure for frontend compatibility
+            $answers = [];
+            if (!empty($rawAnswers)) {
+                // Find the group ID from template structure
+                $templateStructure = [];
+                if (is_string($template->structure)) {
+                    $templateStructure = json_decode($template->structure, true) ?: [];
+                } elseif (is_array($template->structure) || is_object($template->structure)) {
+                    $templateStructure = (array)$template->structure;
+                }
+
+                // Get the first group ID (assuming single group for scorecards)
+                $groupId = null;
+                if (!empty($templateStructure) && is_array($templateStructure)) {
+                    $firstGroup = reset($templateStructure);
+                    if (isset($firstGroup['id'])) {
+                        $groupId = $firstGroup['id'];
+                    }
+                }
+
+                if ($groupId) {
+                    $answers[$groupId] = $rawAnswers;
+                } else {
+                    // Fallback: use the raw answers as-is
+                    $answers = $rawAnswers;
+                }
+            }
+
+            // Parse template structure
+            $structure = [];
+            if (is_string($template->structure)) {
+                $structure = json_decode($template->structure, true) ?: [];
+            } elseif (is_array($template->structure) || is_object($template->structure)) {
+                $structure = (array)$template->structure;
+            }
+
+            $responseData = [
+                'success' => true,
+                'data' => [
+                    'scorecard_unique_id' => $scorecard->scorecard_unique_id,
+                    'template_id' => $scorecard->template_id,
+                    'answer_id' => $scorecard->id,
+                    'answers' => $answers,
+                    'structure' => $structure,
+                    'assigned_employee_username' => $scorecard->assigned_employee_username,
+                    'parent_scorecard_id' => $scorecard->parent_scorecard_id,
+                    'created' => $scorecard->created,
+                    'modified' => $scorecard->modified
+                ]
+            ];
+
+            return $this->response
+                ->withType('application/json')
+                ->withStringBody(json_encode($responseData));
+
+        } catch (\Exception $e) {
+            return $this->response
+                ->withStatus(500)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Error fetching scorecard data: ' . $e->getMessage()
+                ]));
+        }
+    }
+
+    /**
+     * Get child scorecards by parent answer_id
+     * @return \Cake\Http\Response
+     */
+    public function getChildScorecards()
+    {
+        Configure::write('debug', true);
+        $this->request->allowMethod(['post']);
+
+        // Authentication check
+        $authResult = $this->Authentication->getResult();
+        if (!$authResult || !$authResult->isValid()) {
+            return $this->response
+                ->withStatus(401)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Unauthorized access'
+                ]));
+        }
+
+        $data = $this->request->getData();
+        $companyId = $this->getCompanyId($authResult);
+        $parentAnswerId = $data['parent_answer_id'] ?? null;
+
+        // Validation
+        if (empty($parentAnswerId)) {
+            return $this->response
+                ->withStatus(400)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Missing parent answer ID'
+                ]));
+        }
+
+        try {
+            $ScorecardTemplateAnswersTable = $this->getTable('ScorecardTemplateAnswers', $companyId);
+            $ScorecardTemplatesTable = $this->getTable('ScorecardTemplates', $companyId);
+
+            // Get all child scorecards where parent_scorecard_id matches the parent's answer_id
+            $childScorecards = $ScorecardTemplateAnswersTable->find()
+                ->where([
+                    'company_id' => $companyId,
+                    'deleted' => 0,
+                    'parent_scorecard_id' => $parentAnswerId
+                ])
+                ->all()
+                ->toArray();
+
+            if (empty($childScorecards)) {
+                return $this->response
+                    ->withType('application/json')
+                    ->withStringBody(json_encode([
+                        'success' => true,
+                        'data' => []
+                    ]));
+            }
+
+            // Process each child scorecard to extract scorecard_code and format data
+            $processedChildren = [];
+            foreach ($childScorecards as $child) {
+                // Get template structure for this child
+                $template = $ScorecardTemplatesTable->find()
+                    ->where([
+                        'id' => $child->template_id,
+                        'company_id' => $companyId,
+                        'deleted' => 0
+                    ])
+                    ->first();
+
+                if (!$template) {
+                    continue; // Skip if template not found
+                }
+
+                // Parse answers
+                $rawAnswers = [];
+                if (!empty($child->answers)) {
+                    if (is_string($child->answers)) {
+                        $rawAnswers = json_decode($child->answers, true) ?: [];
+                    } elseif (is_array($child->answers)) {
+                        $rawAnswers = $child->answers;
+                    }
+                }
+
+                // Convert flat structure to nested structure for frontend compatibility
+                $answers = [];
+                if (!empty($rawAnswers)) {
+                    // Find the group ID from template structure
+                    $templateStructure = [];
+                    if (is_string($template->structure)) {
+                        $templateStructure = json_decode($template->structure, true) ?: [];
+                    } elseif (is_array($template->structure) || is_object($template->structure)) {
+                        $templateStructure = (array)$template->structure;
+                    }
+
+                    // Get the first group ID (assuming single group for scorecards)
+                    $groupId = null;
+                    if (!empty($templateStructure) && is_array($templateStructure)) {
+                        $firstGroup = reset($templateStructure);
+                        if (isset($firstGroup['id'])) {
+                            $groupId = $firstGroup['id'];
+                        }
+                    }
+
+                    if ($groupId) {
+                        $answers[$groupId] = $rawAnswers;
+                    } else {
+                        // Fallback: use the raw answers as-is
+                        $answers = $rawAnswers;
+                    }
+                }
+
+                // Extract scorecard_code from answers (first field value)
+                $scorecardCode = "N/A";
+                if (!empty($answers)) {
+                    // Flatten nested structure to get first value
+                    $flatAnswers = [];
+                    if (is_array($answers)) {
+                        $answerKeys = array_keys($answers);
+                        if (!empty($answerKeys)) {
+                            $firstKey = $answerKeys[0];
+                            if (is_array($answers[$firstKey])) {
+                                // It's nested, flatten it
+                                foreach ($answers[$firstKey] as $key => $value) {
+                                    $flatAnswers[$key] = $value;
+                                }
+                            } else {
+                                // It's already flat
+                                $flatAnswers = $answers;
+                            }
+                        }
+                    }
+                    
+                    $flatAnswerKeys = array_keys($flatAnswers);
+                    if (!empty($flatAnswerKeys)) {
+                        $scorecardCode = $flatAnswers[$flatAnswerKeys[0]] ?? "N/A";
+                    }
+                }
+
+                $processedChildren[] = [
+                    'scorecard_unique_id' => $child->scorecard_unique_id,
+                    'template_id' => $child->template_id,
+                    'answer_id' => $child->id,
+                    'answers' => $answers,
+                    'scorecard_code' => $scorecardCode,
+                    'assigned_employee_username' => $child->assigned_employee_username,
+                    'parent_scorecard_id' => $child->parent_scorecard_id,
+                    'created' => $child->created,
+                    'modified' => $child->modified
+                ];
+            }
+
+            return $this->response
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => true,
+                    'data' => $processedChildren
+                ]));
+
+        } catch (\Exception $e) {
+            return $this->response
+                ->withStatus(500)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Error fetching child scorecards: ' . $e->getMessage()
+                ]));
+        }
+    }
+
+    /**
      * Update scorecard
      * @return \Cake\Http\Response
      */
@@ -2495,7 +3102,7 @@ class ScorecardsController extends ApiController
             }
         }
         
-        // Default fallback
-        return '200001'; // Default company ID
+        // If company_id cannot be determined, throw an exception
+        throw new Exception('Unable to determine company ID from authentication result.');
     }
 }
