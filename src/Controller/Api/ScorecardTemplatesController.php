@@ -31,6 +31,12 @@ class ScorecardTemplatesController extends ApiController
             ]));
         }
 
+        // Require admin access for template management
+        $adminCheck = $this->requireAdminForTemplates();
+        if ($adminCheck !== null) {
+            return $adminCheck;
+        }
+
         try {
             $data = $this->request->getData();
             $company_id = $this->getCompanyId($authResult);
@@ -104,6 +110,12 @@ class ScorecardTemplatesController extends ApiController
                     'success' => false,
                     'message' => 'Unauthorized access',
                 ]));
+        }
+
+        // Require admin access for template management
+        $adminCheck = $this->requireAdminForTemplates();
+        if ($adminCheck !== null) {
+            return $adminCheck;
         }
 
         try {

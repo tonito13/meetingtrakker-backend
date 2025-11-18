@@ -14,6 +14,7 @@ use Cake\Utility\Security;
 use Cake\ORM\TableRegistry;
 use Cake\DataSource\ConnectionManager;
 use Cake\Core\Configure;
+use Cake\Log\Log;
 
 class UsersController extends ApiController
 {
@@ -91,6 +92,15 @@ class UsersController extends ApiController
                 ->withType('application/json')
                 ->withStringBody(json_encode(['message' => 'Invalid username or password']));
         }
+
+        // Check for company mapping for scorecardtrakker
+        $mappedCompanyId = $this->getMappedCompanyId($user->id, $user->username, 'scorecardtrakker');
+        $effectiveCompanyId = $mappedCompanyId ?? $user->company_id;
+
+        // Override user's company_id with mapped company_id if mapping exists
+        if ($mappedCompanyId !== null) {
+            $user->company_id = $mappedCompanyId;
+        }
        
         $token = $this->generateToken($user);
        
@@ -148,4 +158,43 @@ class UsersController extends ApiController
         return $this->response->withType('application/json')
             ->withStringBody(json_encode($token));
     }
+
+    /**
+     * Get mapped company ID for a user
+     * 
+     * @param int $userId User ID
+     * @param string $username Username
+     * @param string $systemType System type (default: 'scorecardtrakker')
+     * @return int|null Mapped company ID if mapping exists and is active, null otherwise
+     */
+    private function getMappedCompanyId($userId, $username, $systemType = 'scorecardtrakker')
+    {
+        try {
+            // Get UserCompanyMappings table from default database (workmatica)
+            $mappingsTable = $this->getTable('UserCompanyMappings');
+            $mapping = $mappingsTable->find()
+                ->where([
+                    'user_id' => $userId,
+                    'username' => $username,
+                    'system_type' => $systemType,
+                    'active' => true,
+                    'deleted' => false
+                ])
+                ->first();
+            
+            if ($mapping) {
+                return $mapping->mapped_company_id;
+            }
+            return null;
+        } catch (\Exception $e) {
+            // Log error but don't expose details
+            Log::error('Error checking user company mapping: ' . $e->getMessage(), [
+                'user_id' => $userId,
+                'username' => $username,
+                'system_type' => $systemType
+            ]);
+            return null;
+        }
+    }
+
 }

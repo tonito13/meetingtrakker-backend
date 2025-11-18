@@ -6,6 +6,7 @@ namespace App\Controller\Api;
 
 use App\Controller\Api\ApiController;
 use App\Helper\AuditHelper;
+use App\Service\CompanyMappingService;
 use Cake\Core\Configure;
 use Cake\Utility\Text;
 use Exception;
@@ -15,9 +16,24 @@ use Cake\Datasource\ConnectionManager;
 
 class EmployeesController extends ApiController
 {
+    private ?CompanyMappingService $companyMappingService = null;
+
     public function initialize(): void
     {
         parent::initialize();
+    }
+
+    /**
+     * Get CompanyMappingService instance
+     *
+     * @return CompanyMappingService
+     */
+    private function getCompanyMappingService(): CompanyMappingService
+    {
+        if ($this->companyMappingService === null) {
+            $this->companyMappingService = new CompanyMappingService();
+        }
+        return $this->companyMappingService;
     }
 
     public function getEmployees()
@@ -158,6 +174,29 @@ class EmployeesController extends ApiController
                     'message' => 'Unauthorized access',
                 ]));
         }
+
+        // Require admin access for adding employees
+        // Debug: Log authentication data before admin check
+        $authData = $authResult->getData();
+        Log::debug('🔍 DEBUG: addEmployee - Authentication data before admin check', [
+            'auth_data_type' => gettype($authData),
+            'auth_data_class' => is_object($authData) ? get_class($authData) : null,
+            'auth_data_keys' => is_object($authData) ? array_keys((array)$authData) : (is_array($authData) ? array_keys($authData) : []),
+            'auth_data' => is_object($authData) ? (array)$authData : $authData,
+            'system_user_role_direct' => is_object($authData) ? ($authData->system_user_role ?? 'NOT_SET') : (is_array($authData) ? ($authData['system_user_role'] ?? 'NOT_SET') : 'NOT_OBJECT_OR_ARRAY'),
+        ]);
+        
+        $adminCheck = $this->requireAdmin();
+        if ($adminCheck !== null) {
+            // Log why admin check failed
+            Log::warning('🔍 DEBUG: addEmployee - Admin check failed', [
+                'is_admin_result' => $this->isAdmin(),
+                'auth_data_sample' => is_object($authData) ? (array)$authData : $authData
+            ]);
+            return $adminCheck;
+        }
+        
+        Log::debug('🔍 DEBUG: addEmployee - Admin check passed, proceeding with employee creation');
 
         $companyId = $this->getCompanyId($authResult);
         $logged_username = $this->getUsername($authResult);
@@ -691,8 +730,9 @@ class EmployeesController extends ApiController
         if (empty($userData['nationality'])) {
             $userData['nationality'] = 'Not Specified'; // Default nationality
         }
+        // Blood type has max length of 3 characters, so use null or empty string instead of 'Not Specified'
         if (empty($userData['blood_type'])) {
-            $userData['blood_type'] = 'Not Specified'; // Default blood type
+            $userData['blood_type'] = null; // Allow null/empty for blood type (max 3 chars in DB)
         }
         if (empty($userData['birth_place'])) {
             $userData['birth_place'] = 'Not Specified'; // Default birth place
@@ -1026,6 +1066,91 @@ class EmployeesController extends ApiController
         return $fieldIds[$label] ?? strtolower(str_replace(' ', '', $label));
     }
 
+    /**
+     * Check if required templates exist for employee import
+     * 
+     * @return \Cake\Http\Response
+     */
+    public function checkRequiredTemplates()
+    {
+        $this->request->allowMethod(['get']);
+
+        // Authentication check
+        $authResult = $this->Authentication->getResult();
+        if (!$authResult || !$authResult->isValid()) {
+            return $this->response
+                ->withStatus(401)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Unauthorized access',
+                ]));
+        }
+
+        $companyId = $this->getCompanyId($authResult);
+
+        try {
+            $missingTemplates = [];
+            
+            // Check Employee Template
+            $employeeTemplatesTable = $this->getTable('EmployeeTemplates', $companyId);
+            $employeeTemplate = $employeeTemplatesTable->find()
+                ->where([
+                    'company_id' => $companyId,
+                    'deleted' => 0
+                ])
+                ->first();
+            
+            if (!$employeeTemplate) {
+                $missingTemplates[] = 'employee';
+            }
+            
+            // Check Job Role Template
+            $jobRoleTemplatesTable = $this->getTable('JobRoleTemplates', $companyId);
+            $jobRoleTemplate = $jobRoleTemplatesTable->find()
+                ->where([
+                    'company_id' => $companyId,
+                    'deleted' => 0
+                ])
+                ->first();
+            
+            if (!$jobRoleTemplate) {
+                $missingTemplates[] = 'job_role';
+            }
+            
+            // Check Role Level Template
+            $levelTemplatesTable = $this->getTable('LevelTemplates', $companyId);
+            $levelTemplate = $levelTemplatesTable->find()
+                ->where([
+                    'company_id' => $companyId,
+                    'deleted' => 0
+                ])
+                ->first();
+            
+            if (!$levelTemplate) {
+                $missingTemplates[] = 'role_level';
+            }
+            
+            return $this->response
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => true,
+                    'all_templates_exist' => empty($missingTemplates),
+                    'missing_templates' => $missingTemplates,
+                ]));
+                
+        } catch (\Exception $e) {
+            Log::error('Error checking required templates: ' . $e->getMessage());
+            return $this->response
+                ->withStatus(500)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Error checking templates: ' . $e->getMessage(),
+                ]));
+        }
+    }
+
     public function getEmployeesData()
     {
         Configure::write('debug', true);
@@ -1113,31 +1238,66 @@ class EmployeesController extends ApiController
             // Create a lookup for job role details
             $jobRoleLookup = [];
             foreach ($jobRoleData as $jobRole) {
-                $jobRoleAnswers = json_decode($jobRole->job_role_answer, true);
-                $jobRoleStructure = $jobRole->job_role_structure;
+                // Decode job role answers if it's a JSON string
+                $jobRoleAnswers = is_string($jobRole->job_role_answer) 
+                    ? json_decode($jobRole->job_role_answer, true) 
+                    : $jobRole->job_role_answer;
+                
+                // Decode job role structure if it's a JSON string
+                $jobRoleStructure = is_string($jobRole->job_role_structure) 
+                    ? json_decode($jobRole->job_role_structure, true) 
+                    : $jobRole->job_role_structure;
+                
                 $jobRoleUniqueId = $jobRole->job_role_unique_id;
 
                 $designation = null;
                 if (is_array($jobRoleStructure) && is_array($jobRoleAnswers)) {
                     foreach ($jobRoleStructure as $group) {
+                        $groupId = $group['id'] ?? null;
+                        
+                        // Check regular fields
+                        if (isset($group['fields']) && is_array($group['fields'])) {
                         foreach ($group['fields'] as $field) {
-                            $fieldLabel = $field['customize_field_label'] ?? $field['label'];
+                                $fieldLabel = $field['customize_field_label'] ?? $field['label'] ?? '';
                             if (in_array($fieldLabel, ['Job Role', 'Official Designation', 'Job Title'], true)) {
-                                $fieldId = $field['id'];
-                                foreach ($jobRoleAnswers as $groupAnswers) {
-                                    if (isset($groupAnswers[$fieldId])) {
-                                        $designation = $groupAnswers[$fieldId];
-                                        break;
+                                    $fieldId = $field['id'] ?? null;
+                                    if ($groupId && $fieldId && isset($jobRoleAnswers[$groupId][$fieldId])) {
+                                        $designation = $jobRoleAnswers[$groupId][$fieldId];
+                                        break 2;
                                     }
                                 }
-                                break;
                             }
                         }
+                        
+                        // Check subgroups
+                        if (!$designation && isset($group['subGroups']) && is_array($group['subGroups'])) {
+                            foreach ($group['subGroups'] as $subGroupIndex => $subGroup) {
+                                $subGroupId = $subGroup['id'] ?? $groupId;
+                                if (isset($subGroup['fields']) && is_array($subGroup['fields'])) {
+                                    foreach ($subGroup['fields'] as $field) {
+                                        $fieldLabel = $field['customize_field_label'] ?? $field['label'] ?? '';
+                                        if (in_array($fieldLabel, ['Job Role', 'Official Designation', 'Job Title'], true)) {
+                                            $fieldId = $field['id'] ?? null;
+                                            if ($subGroupId && $fieldId && isset($jobRoleAnswers[$subGroupId][$fieldId])) {
+                                                $designation = $jobRoleAnswers[$subGroupId][$fieldId];
+                                                break 3;
+                                    }
+                                }
+                                    }
+                            }
+                        }
+                        }
+                        
                         if ($designation) break;
                     }
                 }
                 $jobRoleLookup[$jobRoleUniqueId] = $designation ?: null;
             }
+            
+            Log::debug('🔍 DEBUG: Job role lookup created', [
+                'total_job_roles' => count($jobRoleLookup),
+                'sample_lookup' => array_slice($jobRoleLookup, 0, 5, true)
+            ]);
 
             // Step 3: Fetch employee answers with pagination
             $query = $EmployeeTemplatesTable
@@ -1186,6 +1346,7 @@ class EmployeesController extends ApiController
                 'First Name' => ['id' => 'firstName', 'dataKey' => 'first_name'],
                 'Last Name' => ['id' => 'lastName', 'dataKey' => 'last_name'],
                 'Job Role' => ['id' => 'jobRole', 'dataKey' => 'job_role'],
+                'Reports To' => ['id' => 'reportsTo', 'dataKey' => 'reports_to'],
             ];
 
             $processedEmployees = array_map(function ($employee) use ($fieldMapping, $jobRoleLookup) {
@@ -1220,11 +1381,40 @@ class EmployeesController extends ApiController
 
                 if (is_array($structure)) {
                     foreach ($structure as $group) {
-                        if (!isset($group['fields']) || !is_array($group['fields'])) {
-                            continue;
-                        }
+                        $groupId = $group['id'] ?? null;
 
+                        // Check regular fields
+                        if (isset($group['fields']) && is_array($group['fields'])) {
                         foreach ($group['fields'] as $field) {
+                                $fieldId = $field['id'];
+                                $fieldLabel = $field['label'] ?? $field['customize_field_label'] ?? '';
+
+                                if (isset($fieldMapping[$fieldLabel])) {
+                                    $dataKey = $fieldMapping[$fieldLabel]['dataKey'];
+
+                                    if (is_array($answers) && $groupId) {
+                                        // Check in the group's answers
+                                        if (isset($answers[$groupId][$fieldId])) {
+                                            $answerValue = $answers[$groupId][$fieldId];
+                                            
+                                            if ($dataKey === 'job_role') {
+                                                $jobRoleUniqueId = $answerValue; // Store job_role_unique_id
+                                            } else {
+                                                $result[$dataKey] = $answerValue;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Check subgroups
+                        if (isset($group['subGroups']) && is_array($group['subGroups'])) {
+                            $groupLabel = $group['label'] ?? $group['id'];
+                            foreach ($group['subGroups'] as $index => $subGroup) {
+                                $subGroupLabel = "{$groupLabel}_{$index}";
+                                if (isset($subGroup['fields']) && is_array($subGroup['fields'])) {
+                                    foreach ($subGroup['fields'] as $field) {
                             $fieldId = $field['id'];
                             $fieldLabel = $field['label'] ?? $field['customize_field_label'] ?? '';
 
@@ -1232,16 +1422,17 @@ class EmployeesController extends ApiController
                                 $dataKey = $fieldMapping[$fieldLabel]['dataKey'];
 
                                 if (is_array($answers)) {
-                                    foreach ($answers as $groupAnswers) {
-                                    if (isset($groupAnswers[$fieldId])) {
-                                        $answerValue = $groupAnswers[$fieldId];
+                                                // Check in the subgroup's answers
+                                                if (isset($answers[$subGroupLabel][$fieldId])) {
+                                                    $answerValue = $answers[$subGroupLabel][$fieldId];
                                         
                                         if ($dataKey === 'job_role') {
                                             $jobRoleUniqueId = $answerValue; // Store job_role_unique_id
                                         } else {
                                             $result[$dataKey] = $answerValue;
                                         }
-                                        break;
+                                                }
+                                            }
                                     }
                                 }
                                 }
@@ -1261,17 +1452,41 @@ class EmployeesController extends ApiController
                 // Set job_role based on jobRoleLookup
                 if ($jobRoleUniqueId && isset($jobRoleLookup[$jobRoleUniqueId])) {
                     $result['job_role'] = $jobRoleLookup[$jobRoleUniqueId];
+                } else {
+                    // If job role not found in lookup, ensure it's set to null
+                    if (!isset($result['job_role'])) {
+                        $result['job_role'] = null;
+                    }
+                }
+                
+                // Debug logging for job role mapping
+                if ($jobRoleUniqueId) {
+                    Log::debug('🔍 DEBUG: Job role mapping for employee', [
+                        'employee_unique_id' => $employee->employee_unique_id,
+                        'username' => $employee->username ?? 'NULL',
+                        'job_role_unique_id' => $jobRoleUniqueId,
+                        'job_role_found' => isset($jobRoleLookup[$jobRoleUniqueId]),
+                        'job_role_value' => $result['job_role'] ?? 'NULL'
+                    ]);
                 }
 
                 // Debug logging for final result
                 Log::debug('🔍 DEBUG: Final employee result in getEmployeesData', [
                     'result' => $result,
                     'username_in_result' => $result['username'] ?? 'NOT_SET',
-                    'username_type' => gettype($result['username'] ?? null)
+                    'username_type' => gettype($result['username'] ?? null),
+                    'job_role' => $result['job_role'] ?? 'NULL'
                 ]);
 
                 return $result;
             }, $allEmployeeAnswers);
+
+            // Employee management page shows ALL employees for the company
+            // No filtering by reporting relationships - this is the employee list view
+            Log::debug('🔍 DEBUG: getEmployeesData - Showing all employees for company', [
+                'company_id' => $company_id,
+                'total_employees' => count($processedEmployees)
+            ]);
 
             // Apply search filter if provided
             if (!empty($search)) {
@@ -1323,6 +1538,353 @@ class EmployeesController extends ApiController
                 ->withStringBody(json_encode([
                     'success' => false,
                     'message' => 'Error fetching employees: ' . $e->getMessage(),
+                ]));
+        }
+    }
+
+    /**
+     * Get employees for assignment (e.g., assigning child scorecards)
+     * For non-admin users: only returns employees that report to the current user
+     * For admin users: returns all employees
+     */
+    public function getEmployeesForAssignment()
+    {
+        Configure::write('debug', true);
+        $this->request->allowMethod(['get']);
+
+        $authResult = $this->Authentication->getResult();
+        if (!$authResult || !$authResult->isValid()) {
+            return $this->response
+                ->withStatus(401)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Unauthorized access',
+                ]));
+        }
+
+        $company_id = $this->getCompanyId($authResult);
+
+        try {
+            $EmployeeTemplatesTable = $this->getTable('EmployeeTemplates', $company_id);
+            $JobRoleTemplatesTable = $this->getTable('JobRoleTemplates', $company_id);
+
+            // Step 1: Build lookup of level_unique_id => rank and name (for job roles)
+            $RoleLevelsTable = $this->getTable('RoleLevels', $company_id);
+            $roleLevelsData = $RoleLevelsTable
+                ->find()
+                ->select(['level_unique_id', 'name', 'rank'])
+                ->where([
+                    'company_id' => $company_id,
+                    'deleted' => 0,
+                    'level_unique_id IS NOT' => null,
+                ])
+                ->all()
+                ->toArray();
+
+            // Step 2: Fetch job role answers to map job_role_unique_id to job role details
+            $jobRoleData = $JobRoleTemplatesTable
+                ->find()
+                ->select([
+                    'job_role_unique_id' => 'job_role_template_answers.job_role_unique_id',
+                    'job_role_answer' => 'job_role_template_answers.answers',
+                    'job_role_structure' => 'JobRoleTemplates.structure',
+                ])
+                ->join([
+                    'job_role_template_answers' => [
+                        'table' => 'job_role_template_answers',
+                        'type' => 'INNER',
+                        'conditions' => [
+                            'job_role_template_answers.company_id = JobRoleTemplates.company_id',
+                            'job_role_template_answers.template_id = JobRoleTemplates.id',
+                            'job_role_template_answers.deleted' => 0,
+                        ],
+                    ],
+                ])
+                ->where([
+                    'JobRoleTemplates.company_id' => $company_id,
+                    'JobRoleTemplates.deleted' => 0,
+                    'job_role_template_answers.job_role_unique_id IS NOT NULL',
+                ])
+                ->all()
+                ->toArray();
+
+            // Create a lookup for job role details
+            $jobRoleLookup = [];
+            foreach ($jobRoleData as $jobRole) {
+                $jobRoleAnswers = is_string($jobRole->job_role_answer) 
+                    ? json_decode($jobRole->job_role_answer, true) 
+                    : $jobRole->job_role_answer;
+                
+                $jobRoleStructure = is_string($jobRole->job_role_structure) 
+                    ? json_decode($jobRole->job_role_structure, true) 
+                    : $jobRole->job_role_structure;
+                
+                $jobRoleUniqueId = $jobRole->job_role_unique_id;
+                $designation = null;
+                
+                if (is_array($jobRoleStructure) && is_array($jobRoleAnswers)) {
+                    foreach ($jobRoleStructure as $group) {
+                        $groupId = $group['id'] ?? null;
+                        
+                        if (isset($group['fields']) && is_array($group['fields'])) {
+                            foreach ($group['fields'] as $field) {
+                                $fieldLabel = $field['customize_field_label'] ?? $field['label'] ?? '';
+                                if (in_array($fieldLabel, ['Job Role', 'Official Designation', 'Job Title'], true)) {
+                                    $fieldId = $field['id'] ?? null;
+                                    if ($groupId && $fieldId && isset($jobRoleAnswers[$groupId][$fieldId])) {
+                                        $designation = $jobRoleAnswers[$groupId][$fieldId];
+                                        break 2;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if (!$designation && isset($group['subGroups']) && is_array($group['subGroups'])) {
+                            foreach ($group['subGroups'] as $subGroup) {
+                                $subGroupId = $subGroup['id'] ?? $groupId;
+                                if (isset($subGroup['fields']) && is_array($subGroup['fields'])) {
+                                    foreach ($subGroup['fields'] as $field) {
+                                        $fieldLabel = $field['customize_field_label'] ?? $field['label'] ?? '';
+                                        if (in_array($fieldLabel, ['Job Role', 'Official Designation', 'Job Title'], true)) {
+                                            $fieldId = $field['id'] ?? null;
+                                            if ($subGroupId && $fieldId && isset($jobRoleAnswers[$subGroupId][$fieldId])) {
+                                                $designation = $jobRoleAnswers[$subGroupId][$fieldId];
+                                                break 3;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if ($designation) break;
+                    }
+                }
+                $jobRoleLookup[$jobRoleUniqueId] = $designation ?: null;
+            }
+
+            // Step 3: Fetch employee answers
+            $query = $EmployeeTemplatesTable
+                ->find()
+                ->select([
+                    'structure' => 'structure',
+                    'employee_unique_id' => 'employee_template_answers.employee_unique_id',
+                    'username' => 'employee_template_answers.username',
+                    'template_id' => 'employee_template_answers.template_id',
+                    'answer_id' => 'employee_template_answers.id',
+                    'answers' => 'employee_template_answers.answers',
+                ])
+                ->join([
+                    'employee_template_answers' => [
+                        'table' => 'employee_template_answers',
+                        'type' => 'LEFT',
+                        'conditions' => [
+                            'employee_template_answers.company_id = EmployeeTemplates.company_id',
+                            'employee_template_answers.deleted' => 0,
+                        ]
+                    ],
+                ])
+                ->where([
+                    'EmployeeTemplates.company_id' => $company_id,
+                    'EmployeeTemplates.deleted' => 0,
+                    'employee_template_answers.employee_unique_id IS NOT NULL',
+                ]);
+
+            $allEmployeeAnswers = $query->all()->toArray();
+
+            if (empty($allEmployeeAnswers)) {
+                return $this->response
+                    ->withType('application/json')
+                    ->withStringBody(json_encode([
+                        'success' => true,
+                        'data' => [
+                            'records' => [],
+                            'total' => 0
+                        ],
+                    ]));
+            }
+
+            $fieldMapping = [
+                'Employee ID' => ['id' => 'employeeId', 'dataKey' => 'employee_id'],
+                'First Name' => ['id' => 'firstName', 'dataKey' => 'first_name'],
+                'Last Name' => ['id' => 'lastName', 'dataKey' => 'last_name'],
+                'Job Role' => ['id' => 'jobRole', 'dataKey' => 'job_role'],
+                'Reports To' => ['id' => 'reportsTo', 'dataKey' => 'reports_to'],
+            ];
+
+            $processedEmployees = array_map(function ($employee) use ($fieldMapping, $jobRoleLookup) {
+                $result = [
+                    'id' => $employee->answer_id,
+                    'employee_unique_id' => $employee->employee_unique_id,
+                    'username' => $employee->username ?? '',
+                ];
+
+                $structure = is_string($employee->structure) ? json_decode($employee->structure, true) : $employee->structure;
+                
+                if (is_string($employee->answers)) {
+                    $answers = json_decode($employee->answers, true);
+                    if (json_last_error() !== JSON_ERROR_NONE) {
+                        throw new \Exception('Invalid answers JSON format for employee_unique_id: ' . $employee->employee_unique_id);
+                    }
+                } else {
+                    $answers = $employee->answers;
+                }
+
+                $jobRoleUniqueId = null;
+
+                if (is_array($structure)) {
+                    foreach ($structure as $group) {
+                        $groupId = $group['id'] ?? null;
+
+                        if (isset($group['fields']) && is_array($group['fields'])) {
+                            foreach ($group['fields'] as $field) {
+                                $fieldId = $field['id'];
+                                $fieldLabel = $field['label'] ?? $field['customize_field_label'] ?? '';
+
+                                if (isset($fieldMapping[$fieldLabel])) {
+                                    $dataKey = $fieldMapping[$fieldLabel]['dataKey'];
+
+                                    if (is_array($answers) && $groupId) {
+                                        if (isset($answers[$groupId][$fieldId])) {
+                                            $answerValue = $answers[$groupId][$fieldId];
+                                            
+                                            if ($dataKey === 'job_role') {
+                                                $jobRoleUniqueId = $answerValue;
+                                            } else {
+                                                $result[$dataKey] = $answerValue;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if (isset($group['subGroups']) && is_array($group['subGroups'])) {
+                            $groupLabel = $group['label'] ?? $group['id'];
+                            foreach ($group['subGroups'] as $index => $subGroup) {
+                                $subGroupLabel = "{$groupLabel}_{$index}";
+                                if (isset($subGroup['fields']) && is_array($subGroup['fields'])) {
+                                    foreach ($subGroup['fields'] as $field) {
+                                        $fieldId = $field['id'];
+                                        $fieldLabel = $field['label'] ?? $field['customize_field_label'] ?? '';
+
+                                        if (isset($fieldMapping[$fieldLabel])) {
+                                            $dataKey = $fieldMapping[$fieldLabel]['dataKey'];
+
+                                            if (is_array($answers)) {
+                                                if (isset($answers[$subGroupLabel][$fieldId])) {
+                                                    $answerValue = $answers[$subGroupLabel][$fieldId];
+                                        
+                                                    if ($dataKey === 'job_role') {
+                                                        $jobRoleUniqueId = $answerValue;
+                                                    } else {
+                                                        $result[$dataKey] = $answerValue;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Add nulls for missing fields
+                foreach ($fieldMapping as $mapping) {
+                    $dataKey = $mapping['dataKey'];
+                    if (!isset($result[$dataKey])) {
+                        $result[$dataKey] = null;
+                    }
+                }
+
+                // Set job_role based on jobRoleLookup
+                if ($jobRoleUniqueId && isset($jobRoleLookup[$jobRoleUniqueId])) {
+                    $result['job_role'] = $jobRoleLookup[$jobRoleUniqueId];
+                } else {
+                    if (!isset($result['job_role'])) {
+                        $result['job_role'] = null;
+                    }
+                }
+
+                return $result;
+            }, $allEmployeeAnswers);
+
+            // Filter employees by reporting relationships for non-admin users
+            $isAdmin = $this->isAdmin();
+            if (!$isAdmin) {
+                // Get logged-in user's username and employee_unique_id
+                $loggedUsername = $this->getUsername($authResult);
+                
+                // Find the logged-in user's employee_unique_id
+                $loggedUserEmployee = $EmployeeTemplatesTable
+                    ->find()
+                    ->select([
+                        'employee_unique_id' => 'employee_template_answers.employee_unique_id',
+                    ])
+                    ->join([
+                        'employee_template_answers' => [
+                            'table' => 'employee_template_answers',
+                            'type' => 'INNER',
+                            'conditions' => [
+                                'employee_template_answers.company_id = EmployeeTemplates.company_id',
+                                'employee_template_answers.deleted' => 0,
+                            ]
+                        ],
+                    ])
+                    ->where([
+                        'EmployeeTemplates.company_id' => $company_id,
+                        'EmployeeTemplates.deleted' => 0,
+                        'employee_template_answers.username' => $loggedUsername,
+                        'employee_template_answers.employee_unique_id IS NOT NULL',
+                    ])
+                    ->first();
+                
+                if ($loggedUserEmployee && $loggedUserEmployee->employee_unique_id) {
+                    $loggedUserEmployeeUniqueId = $loggedUserEmployee->employee_unique_id;
+                    
+                    // Filter to only show employees that report to the logged-in user
+                    $processedEmployees = array_filter($processedEmployees, function ($employee) use ($loggedUserEmployeeUniqueId) {
+                        $reportsTo = $employee['reports_to'] ?? null;
+                        return $reportsTo === $loggedUserEmployeeUniqueId;
+                    });
+                    
+                    Log::debug('🔍 DEBUG: getEmployeesForAssignment - Filtered employees by reporting relationship', [
+                        'logged_username' => $loggedUsername,
+                        'logged_user_employee_unique_id' => $loggedUserEmployeeUniqueId,
+                        'filtered_count' => count($processedEmployees)
+                    ]);
+                } else {
+                    // If logged-in user is not found in employee records, show no employees
+                    $processedEmployees = [];
+                    Log::warning('🔍 DEBUG: getEmployeesForAssignment - Logged-in user not found in employee records', [
+                        'logged_username' => $loggedUsername,
+                        'company_id' => $company_id
+                    ]);
+                }
+            } else {
+                Log::debug('🔍 DEBUG: getEmployeesForAssignment - Admin user - showing all employees', [
+                    'total_employees' => count($processedEmployees)
+                ]);
+            }
+
+            return $this->response
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => true,
+                    'data' => [
+                        'records' => array_values($processedEmployees), // Re-index array
+                        'total' => count($processedEmployees)
+                    ],
+                ]));
+        } catch (\Throwable $e) {
+            return $this->response
+                ->withStatus(500)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Error fetching employees for assignment: ' . $e->getMessage(),
                 ]));
         }
     }
@@ -1745,6 +2307,12 @@ class EmployeesController extends ApiController
                     'success' => false,
                     'message' => 'Unauthorized access'
                 ]));
+        }
+
+        // Require admin access for deleting employees
+        $adminCheck = $this->requireAdmin();
+        if ($adminCheck !== null) {
+            return $adminCheck;
         }
 
         $data = $this->request->getData();
@@ -2263,6 +2831,12 @@ class EmployeesController extends ApiController
                 ]));
         }
 
+        // Require admin access for updating employees
+        $adminCheck = $this->requireAdmin();
+        if ($adminCheck !== null) {
+            return $adminCheck;
+        }
+
         $companyId = $this->getCompanyId($authResult);
         $logged_username = $this->getUsername($authResult);
         $data = $this->request->getData();
@@ -2520,7 +3094,7 @@ class EmployeesController extends ApiController
     {
         $UsersTable = $this->getTable('Users');
 
-        // Find the user by username or employee_unique_id (assuming a link exists)
+        // First, try to find the user with the scorecardtrakker company ID (for native employees)
         $user = $UsersTable
             ->find()
             ->where([
@@ -2529,6 +3103,28 @@ class EmployeesController extends ApiController
                 'deleted' => false,
             ])
             ->first();
+
+        // If not found, try to find the user with the orgtrakker company ID (for imported employees)
+        if (!$user) {
+            try {
+                $mappingService = $this->getCompanyMappingService();
+                $orgtrakkerCompanyId = $mappingService->getOrgtrakkerCompanyIdFromScorecardtrakker((int)$companyId);
+                
+                if ($orgtrakkerCompanyId) {
+                    $user = $UsersTable
+                        ->find()
+                        ->where([
+                            'company_id' => $orgtrakkerCompanyId,
+                            'username' => $username,
+                            'deleted' => false,
+                        ])
+                        ->first();
+                }
+            } catch (\Exception $e) {
+                // Log but continue - will throw error below if user still not found
+                Log::debug('Error checking orgtrakker company ID for user lookup: ' . $e->getMessage());
+            }
+        }
 
         if (!$user) {
             throw new Exception('User not found for the given employee.');
@@ -3400,30 +3996,3062 @@ class EmployeesController extends ApiController
      */
     private function getUsername($authResult)
     {
-        $data = $authResult->getData();
+        $authData = $authResult->getData();
+        $username = null;
+        $userId = null;
         
-        // Handle both ArrayObject and stdClass
-        if (is_object($data)) {
-            if (isset($data->username)) {
-                return $data->username;
+        // JWT authenticator with returnPayload => true returns the payload directly
+        // The payload should contain: sub, username, company_id, system_user_role
+        if (is_object($authData)) {
+            // Handle stdClass (JWT decode returns stdClass)
+            $username = $authData->username ?? null;
+            $userId = $authData->sub ?? $authData->id ?? null;
+            
+            // Convert to array for easier access
+            if (!$username) {
+                $authData = (array) $authData;
             }
-            // Convert to array if needed
-            $data = (array) $data;
         }
         
-        if (is_array($data) && isset($data['username'])) {
-            return $data['username'];
+        if (!$username && is_array($authData)) {
+            $username = $authData['username'] ?? null;
+            $userId = $authData['sub'] ?? $authData['id'] ?? null;
         }
         
-        // Fallback: try to get from JWT payload
-        if (method_exists($authResult, 'getPayload')) {
+        // If still not found, try to get from JWT payload method (fallback)
+        if (!$username && method_exists($authResult, 'getPayload')) {
+            try {
             $payload = $authResult->getPayload();
-            if (isset($payload['sub'])) {
-                return $payload['sub'];
+                if (isset($payload['username'])) {
+                    $username = $payload['username'];
+                } elseif (isset($payload['sub'])) {
+                    $userId = $payload['sub'];
+                }
+            } catch (\Exception $e) {
+                Log::debug('🔍 DEBUG: Could not get payload from auth result: ' . $e->getMessage());
             }
         }
         
-        // Default fallback
-        return 'unknown'; // Default username
+        // If username still not found but we have userId, query Users table
+        // Users table is in the workmatica database (default connection)
+        // Query by userId only (it's unique), not by company_id, since users may have different company_ids
+        if (!$username && $userId) {
+            try {
+                // Use default connection (workmatica database) for Users table
+                $UsersTable = $this->getTable('Users', 'default');
+                
+                // Query by userId only (unique), not by company_id
+                // Users can have different company_ids (original orgtrakker company_id vs mapped scorecardtrakker company_id)
+                $user = $UsersTable->find()
+                    ->where([
+                        'id' => $userId,
+                        'deleted' => false
+                    ])
+                    ->first();
+                
+                if ($user && !empty($user->username)) {
+                    $username = $user->username;
+                    Log::debug('🔍 DEBUG: Username retrieved from Users table', [
+                        'user_id' => $userId,
+                        'username' => $username,
+                        'user_company_id' => $user->company_id ?? null
+                    ]);
+                }
+            } catch (\Exception $e) {
+                Log::error('🔍 DEBUG: Error querying Users table for username: ' . $e->getMessage(), [
+                    'user_id' => $userId,
+                    'trace' => $e->getTraceAsString()
+                ]);
+            }
+        }
+        
+        if (!$username) {
+            Log::warning('🔍 DEBUG: Unable to extract username from auth result', [
+                'auth_data_type' => gettype($authData),
+                'user_id' => $userId
+            ]);
+            return 'unknown';
+        }
+        
+        return $username;
+    }
+
+    /**
+     * Get orgtrakker database connection
+     *
+     * @param string|int|null $companyId Current company ID (scorecardtrakker)
+     * @return \Cake\Database\Connection
+     */
+    private function getOrgtrakkerConnection(string|int|null $companyId = null)
+    {
+        // If companyId is provided, try to get mapped orgtrakker company ID
+        if ($companyId !== null) {
+            try {
+                $mappingService = $this->getCompanyMappingService();
+                $orgtrakkerCompanyId = $mappingService->getOrgtrakkerCompanyIdFromScorecardtrakker((int)$companyId);
+                
+                if ($orgtrakkerCompanyId !== null) {
+                    // Use mapped company ID for connection
+                    $connectionName = 'orgtrakker_' . $orgtrakkerCompanyId;
+                    $databaseName = 'orgtrakker_' . $orgtrakkerCompanyId;
+                    
+                    try {
+                        // Try to get existing connection
+                        return ConnectionManager::get($connectionName);
+                    } catch (\Exception $e) {
+                        // Connection doesn't exist, create it dynamically
+                        try {
+                            ConnectionManager::setConfig($connectionName, [
+                                'className' => Connection::class,
+                                'driver' => \Cake\Database\Driver\Postgres::class,
+                                'persistent' => false,
+                                'host' => 'postgres_workmatica_template',
+                                'port' => 5432,
+                                'username' => 'workmatica_user',
+                                'password' => 'securepassword',
+                                'database' => $databaseName,
+                                'encoding' => 'utf8',
+                                'timezone' => 'UTC',
+                                'cacheMetadata' => true,
+                                'quoteIdentifiers' => false,
+                                'log' => false,
+                            ]);
+                            return ConnectionManager::get($connectionName);
+                        } catch (\Exception $createException) {
+                            Log::warning('Could not create connection for mapped orgtrakker company ID, falling back to default', [
+                                'orgtrakker_company_id' => $orgtrakkerCompanyId,
+                                'connection_name' => $connectionName,
+                                'database_name' => $databaseName,
+                                'error' => $createException->getMessage()
+                            ]);
+                        }
+                    }
+                } else {
+                    Log::warning('No mapping found for company ID, falling back to default orgtrakker connection', [
+                        'company_id' => is_string($companyId) ? $companyId : (string)$companyId
+                    ]);
+                }
+            } catch (\Exception $e) {
+                // If mapping service fails, log error and fall back to default
+                Log::error('Error accessing company mapping service, falling back to default orgtrakker connection', [
+                    'company_id' => is_string($companyId) ? $companyId : (string)$companyId,
+                    'error' => $e->getMessage(),
+                    'trace' => $e->getTraceAsString()
+                ]);
+            }
+        }
+        
+        // Fallback to default orgtrakker connection (backward compatibility)
+        return ConnectionManager::get('orgtrakker_100000');
+    }
+
+    /**
+     * Get orgtrakker company ID for current company
+     *
+     * @param string|int $companyId Current company ID (scorecardtrakker)
+     * @return int Orgtrakker company ID, or 100000 as fallback
+     */
+    private function getOrgtrakkerCompanyId(string|int $companyId): int
+    {
+        // Convert to string for consistency
+        $companyIdStr = (string)$companyId;
+        $mappingService = $this->getCompanyMappingService();
+        $orgtrakkerCompanyId = $mappingService->getOrgtrakkerCompanyIdFromScorecardtrakker((int)$companyId);
+        
+        if ($orgtrakkerCompanyId !== null) {
+            return $orgtrakkerCompanyId;
+        }
+        
+        // Fallback to default (backward compatibility)
+        Log::warning('No mapping found for company ID, using default orgtrakker company ID 100000', [
+            'company_id' => (string)$companyId
+        ]);
+        return 100000;
+    }
+
+    /**
+     * Get default employee template for company
+     *
+     * @param string $companyId
+     * @return \App\Model\Entity\EmployeeTemplate
+     * @throws Exception
+     */
+    private function getDefaultEmployeeTemplate($companyId)
+    {
+        $EmployeeTemplatesTable = $this->getTable('EmployeeTemplates', $companyId);
+        $template = $EmployeeTemplatesTable
+            ->find()
+            ->where([
+                'company_id' => $companyId,
+                'name' => 'employee',
+                'deleted' => false,
+            ])
+            ->first();
+
+        if (!$template) {
+            throw new Exception('Default employee template not found. Please create an employee template first.');
+        }
+        return $template;
+    }
+
+    /**
+     * Generate empty answers structure from template
+     *
+     * @param array $templateStructure
+     * @return array
+     */
+    private function generateEmptyAnswersFromTemplate($templateStructure)
+    {
+        $emptyAnswers = [];
+        
+        if (is_string($templateStructure)) {
+            $templateStructure = json_decode($templateStructure, true);
+        }
+        
+        if (!is_array($templateStructure)) {
+            return [];
+        }
+        
+        foreach ($templateStructure as $group) {
+            $groupId = $group['id'] ?? null;
+            if (!$groupId) {
+                continue;
+            }
+            
+            $emptyAnswers[$groupId] = [];
+            
+            // Handle regular fields
+            if (isset($group['fields']) && is_array($group['fields'])) {
+                foreach ($group['fields'] as $field) {
+                    $fieldId = $field['id'] ?? null;
+                    if ($fieldId) {
+                        $emptyAnswers[$groupId][$fieldId] = '';
+                    }
+                }
+            }
+            
+            // Handle subGroups if they exist
+            if (isset($group['subGroups']) && is_array($group['subGroups'])) {
+                foreach ($group['subGroups'] as $index => $subGroup) {
+                    $subGroupId = $subGroup['id'] ?? null;
+                    if (!$subGroupId) {
+                        continue;
+                    }
+                    
+                    $groupLabel = $group['label'] ?? $groupId;
+                    $subGroupLabel = "{$groupLabel}_{$index}";
+                    
+                    $emptyAnswers[$subGroupLabel] = [];
+                    if (isset($subGroup['fields']) && is_array($subGroup['fields'])) {
+                        foreach ($subGroup['fields'] as $field) {
+                            $fieldId = $field['id'] ?? null;
+                            if ($fieldId) {
+                                $emptyAnswers[$subGroupLabel][$fieldId] = '';
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        return $emptyAnswers;
+    }
+
+    /**
+     * Check if employee is already imported
+     *
+     * @param string $companyId
+     * @param string $username
+     * @param string $employeeUniqueId
+     * @return bool
+     */
+    private function checkEmployeeAlreadyImported($companyId, $username, $employeeUniqueId)
+    {
+        $EmployeeTemplateAnswersTable = $this->getTable('EmployeeTemplateAnswers', $companyId);
+        
+        $existing = $EmployeeTemplateAnswersTable
+            ->find()
+            ->where([
+                'company_id' => $companyId,
+                'OR' => [
+                    'username' => $username,
+                    'employee_unique_id' => $employeeUniqueId,
+                ],
+                'deleted' => false,
+            ])
+            ->first();
+        
+        return $existing !== null;
+    }
+
+    /**
+     * Get employee from orgtrakker database
+     *
+     * @param string $employeeUniqueId
+     * @return array|null
+     */
+    private function getOrgtrakkerEmployee($employeeUniqueId, ?string $companyId = null)
+    {
+        try {
+            $connection = $this->getOrgtrakkerConnection($companyId);
+            $stmt = $connection->execute(
+                'SELECT company_id, employee_unique_id, employee_id, username 
+                 FROM employee_template_answers 
+                 WHERE employee_unique_id = :employee_unique_id AND deleted = false 
+                 LIMIT 1',
+                ['employee_unique_id' => $employeeUniqueId]
+            );
+            
+            $result = $stmt->fetch('assoc');
+            return $result ?: null;
+        } catch (\Exception $e) {
+            Log::error('Error fetching orgtrakker employee: ' . $e->getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Get orgtrakker employees available for import
+     *
+     * @return \Cake\Http\Response
+     */
+    public function getOrgtrakkerEmployees()
+    {
+        $this->request->allowMethod(['get']);
+
+        // Authentication check
+        $authResult = $this->Authentication->getResult();
+        if (!$authResult || !$authResult->isValid()) {
+            return $this->response
+                ->withStatus(401)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Unauthorized access',
+                ]));
+        }
+
+        $companyId = $this->getCompanyId($authResult);
+
+        try {
+            $orgtrakkerCompanyId = $this->getOrgtrakkerCompanyId($companyId);
+            $connection = $this->getOrgtrakkerConnection($companyId);
+            
+            // Get all non-deleted employees from orgtrakker with answers JSON
+            $stmt = $connection->execute(
+                'SELECT company_id, employee_unique_id, employee_id, username, answers, template_id
+                 FROM employee_template_answers 
+                 WHERE company_id = :company_id AND deleted = false 
+                 ORDER BY username ASC',
+                ['company_id' => $orgtrakkerCompanyId]
+            );
+            
+            $orgtrakkerEmployees = $stmt->fetchAll('assoc');
+            
+            // Get orgtrakker employee template
+            $orgtrakkerTemplateStmt = $connection->execute(
+                'SELECT id, structure FROM employee_templates WHERE company_id = :company_id AND name = :name AND deleted = false LIMIT 1',
+                ['company_id' => $orgtrakkerCompanyId, 'name' => 'employee']
+            );
+            $orgtrakkerTemplate = $orgtrakkerTemplateStmt->fetch('assoc');
+            $orgtrakkerTemplateStructure = $orgtrakkerTemplate ? json_decode($orgtrakkerTemplate['structure'], true) : [];
+            
+            // Get scorecardtrakker employee template
+            $scorecardtrakkerTemplate = $this->getDefaultEmployeeTemplate($companyId);
+            $scorecardtrakkerTemplateStructure = is_string($scorecardtrakkerTemplate->structure) 
+                ? json_decode($scorecardtrakkerTemplate->structure, true) 
+                : $scorecardtrakkerTemplate->structure;
+            
+            // Get already imported employees from current company with full answers
+            $EmployeeTemplateAnswersTable = $this->getTable('EmployeeTemplateAnswers', $companyId);
+            $importedEmployees = $EmployeeTemplateAnswersTable
+                ->find()
+                ->select(['username', 'employee_unique_id', 'answers'])
+                ->where([
+                    'company_id' => $companyId,
+                    'deleted' => false,
+                ])
+                ->toArray();
+            
+            // Create maps of imported employees by unique_id and username
+            $importedEmployeesMap = [];
+            foreach ($importedEmployees as $imported) {
+                $key = $imported->employee_unique_id ?? $imported->username ?? '';
+                if (!empty($key)) {
+                    $importedEmployeesMap[$key] = $imported;
+                }
+            }
+            
+            // Process all employees
+            $employeesList = [];
+            foreach ($orgtrakkerEmployees as $employee) {
+                $username = $employee['username'] ?? '';
+                $employeeUniqueId = $employee['employee_unique_id'] ?? '';
+                
+                // Check if imported
+                $importedEmployee = $importedEmployeesMap[$employeeUniqueId] ?? $importedEmployeesMap[$username] ?? null;
+                $isImported = $importedEmployee !== null;
+                
+                // Extract first_name, last_name, and job_role_unique_id from answers
+                $orgtrakkerAnswers = json_decode($employee['answers'] ?? '{}', true);
+                $firstName = $this->extractFieldValueFromAnswers($orgtrakkerAnswers, $orgtrakkerTemplateStructure, 'First Name');
+                $lastName = $this->extractFieldValueFromAnswers($orgtrakkerAnswers, $orgtrakkerTemplateStructure, 'Last Name');
+                $jobRoleUniqueId = $this->extractFieldValueFromAnswers($orgtrakkerAnswers, $orgtrakkerTemplateStructure, 'Job Role');
+                
+                // Get job role name from orgtrakker
+                $jobRoleName = '';
+                if ($jobRoleUniqueId) {
+                    $jobRoleStmt = $connection->execute(
+                        'SELECT answers FROM job_role_template_answers WHERE job_role_unique_id = :job_role_unique_id AND deleted = false LIMIT 1',
+                        ['job_role_unique_id' => $jobRoleUniqueId]
+                    );
+                    $jobRole = $jobRoleStmt->fetch('assoc');
+                    if ($jobRole) {
+                        $jobRoleAnswers = json_decode($jobRole['answers'] ?? '{}', true);
+                        $jobRoleTemplateStmt = $connection->execute(
+                            'SELECT structure FROM job_role_templates WHERE company_id = :company_id AND deleted = false LIMIT 1',
+                            ['company_id' => $orgtrakkerCompanyId]
+                        );
+                        $jobRoleTemplate = $jobRoleTemplateStmt->fetch('assoc');
+                        $jobRoleTemplateStructure = $jobRoleTemplate ? json_decode($jobRoleTemplate['structure'], true) : [];
+                        
+                        // Try to get job role name from answers
+                        $jobRoleName = $this->extractFieldValueFromAnswers($jobRoleAnswers, $jobRoleTemplateStructure, 'Job Role');
+                        if (!$jobRoleName) {
+                            $jobRoleName = $this->extractFieldValueFromAnswers($jobRoleAnswers, $jobRoleTemplateStructure, 'Official Designation');
+                        }
+                        if (!$jobRoleName) {
+                            $jobRoleName = $this->extractFieldValueFromAnswers($jobRoleAnswers, $jobRoleTemplateStructure, 'Job Title');
+                        }
+                    }
+                }
+                
+                // Determine status
+                $status = 'not_imported';
+                if ($isImported) {
+                    // Map orgtrakker answers to scorecardtrakker structure
+                    $orgtrakkerMapped = $this->mapFieldValuesByLabel($orgtrakkerAnswers, $orgtrakkerTemplateStructure, $scorecardtrakkerTemplateStructure, $employeeUniqueId);
+                    
+                    // Scorecardtrakker answers are already in the correct structure
+                    $scorecardtrakkerAnswers = is_string($importedEmployee->answers) ? json_decode($importedEmployee->answers, true) : $importedEmployee->answers;
+                    if (!is_array($scorecardtrakkerAnswers)) {
+                        $scorecardtrakkerAnswers = [];
+                    }
+                    
+                    // Compare to detect if update is needed
+                    $needsUpdate = $this->compareMappedAnswers($orgtrakkerMapped, $scorecardtrakkerAnswers, $scorecardtrakkerTemplateStructure, $orgtrakkerTemplateStructure);
+                    $status = $needsUpdate ? 'needs_update' : 'imported';
+                }
+                
+                $employeesList[] = [
+                    'employee_unique_id' => $employeeUniqueId,
+                    'employee_id' => $employee['employee_id'] ?? '',
+                    'username' => $username,
+                    'first_name' => $firstName ?? '',
+                    'last_name' => $lastName ?? '',
+                    'job_role' => $jobRoleName ?? '',
+                    'imported' => $isImported, // Keep for backward compatibility
+                    'status' => $status, // New: 'not_imported', 'imported', or 'needs_update'
+                    'answers' => $orgtrakkerAnswers, // Include full answers for import
+                ];
+            }
+            
+            return $this->response
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => true,
+                    'data' => $employeesList,
+                    'message' => 'Orgtrakker employees retrieved successfully',
+                ]));
+                
+        } catch (\Exception $e) {
+            Log::error('Error fetching orgtrakker employees: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString()
+            ]);
+            return $this->response
+                ->withStatus(500)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Error fetching orgtrakker employees: ' . $e->getMessage(),
+                ]));
+        }
+    }
+
+    /**
+     * Get orgtrakker job roles with import status
+     *
+     * @return \Cake\Http\Response
+     */
+    public function getOrgtrakkerJobRoles()
+    {
+        $this->request->allowMethod(['get']);
+
+        // Authentication check
+        $authResult = $this->Authentication->getResult();
+        if (!$authResult || !$authResult->isValid()) {
+            return $this->response
+                ->withStatus(401)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Unauthorized access',
+                ]));
+        }
+
+        $companyId = $this->getCompanyId($authResult);
+
+        try {
+            $orgtrakkerCompanyId = $this->getOrgtrakkerCompanyId($companyId);
+            $connection = $this->getOrgtrakkerConnection($companyId);
+            
+            // Get all non-deleted job roles from orgtrakker
+            $stmt = $connection->execute(
+                'SELECT job_role_unique_id, answers, template_id
+                 FROM job_role_template_answers 
+                 WHERE company_id = :company_id AND deleted = false 
+                 ORDER BY job_role_unique_id ASC',
+                ['company_id' => $orgtrakkerCompanyId]
+            );
+            
+            $orgtrakkerJobRoles = $stmt->fetchAll('assoc');
+            
+            // Get orgtrakker job role template
+            $orgtrakkerTemplateStmt = $connection->execute(
+                'SELECT structure FROM job_role_templates WHERE company_id = :company_id AND deleted = false LIMIT 1',
+                ['company_id' => $orgtrakkerCompanyId]
+            );
+            $orgtrakkerTemplate = $orgtrakkerTemplateStmt->fetch('assoc');
+            $orgtrakkerTemplateStructure = $orgtrakkerTemplate ? json_decode($orgtrakkerTemplate['structure'], true) : [];
+            
+            // Get scorecardtrakker job role template
+            $scorecardtrakkerTemplate = $this->getDefaultJobRoleTemplate($companyId);
+            $scorecardtrakkerTemplateStructure = is_string($scorecardtrakkerTemplate->structure) 
+                ? json_decode($scorecardtrakkerTemplate->structure, true) 
+                : $scorecardtrakkerTemplate->structure;
+            
+            // Get already imported job roles from current company with full answers
+            $JobRoleTemplateAnswersTable = $this->getTable('JobRoleTemplateAnswers', $companyId);
+            $importedJobRoles = $JobRoleTemplateAnswersTable
+                ->find()
+                ->select(['job_role_unique_id', 'answers'])
+                ->where([
+                    'company_id' => $companyId,
+                    'deleted' => false,
+                ])
+                ->toArray();
+            
+            // Create map of imported job roles
+            $importedJobRolesMap = [];
+            foreach ($importedJobRoles as $imported) {
+                if (!empty($imported->job_role_unique_id)) {
+                    $importedJobRolesMap[$imported->job_role_unique_id] = $imported;
+                }
+            }
+            
+            // Process all job roles
+            $jobRolesList = [];
+            foreach ($orgtrakkerJobRoles as $jobRole) {
+                $jobRoleUniqueId = $jobRole['job_role_unique_id'] ?? '';
+                
+                // Check if imported
+                $importedJobRole = $importedJobRolesMap[$jobRoleUniqueId] ?? null;
+                $isImported = $importedJobRole !== null;
+                
+                // Extract role code and job title from answers
+                $orgtrakkerAnswers = json_decode($jobRole['answers'] ?? '{}', true);
+                $roleCode = $this->extractFieldValueFromAnswers($orgtrakkerAnswers, $orgtrakkerTemplateStructure, 'Role Code');
+                $jobTitle = $this->extractFieldValueFromAnswers($orgtrakkerAnswers, $orgtrakkerTemplateStructure, 'Job Role');
+                if (!$jobTitle) {
+                    $jobTitle = $this->extractFieldValueFromAnswers($orgtrakkerAnswers, $orgtrakkerTemplateStructure, 'Official Designation');
+                }
+                if (!$jobTitle) {
+                    $jobTitle = $this->extractFieldValueFromAnswers($orgtrakkerAnswers, $orgtrakkerTemplateStructure, 'Job Title');
+                }
+                
+                // Determine status
+                $status = 'not_imported';
+                if ($isImported) {
+                    // Map orgtrakker answers to scorecardtrakker structure
+                    $orgtrakkerMapped = $this->mapFieldValuesByLabel($orgtrakkerAnswers, $orgtrakkerTemplateStructure, $scorecardtrakkerTemplateStructure, $jobRoleUniqueId);
+                    
+                    // Scorecardtrakker answers are already in the correct structure
+                    $scorecardtrakkerAnswers = is_string($importedJobRole->answers) ? json_decode($importedJobRole->answers, true) : $importedJobRole->answers;
+                    if (!is_array($scorecardtrakkerAnswers)) {
+                        $scorecardtrakkerAnswers = [];
+                    }
+                    
+                    // Compare to detect if update is needed
+                    $needsUpdate = $this->compareMappedAnswers($orgtrakkerMapped, $scorecardtrakkerAnswers, $scorecardtrakkerTemplateStructure, $orgtrakkerTemplateStructure);
+                    $status = $needsUpdate ? 'needs_update' : 'imported';
+                }
+                
+                $jobRolesList[] = [
+                    'job_role_unique_id' => $jobRoleUniqueId,
+                    'role_code' => $roleCode ?? '',
+                    'job_title' => $jobTitle ?? '',
+                    'imported' => $isImported, // Keep for backward compatibility
+                    'status' => $status, // New: 'not_imported', 'imported', or 'needs_update'
+                    'answers' => $orgtrakkerAnswers, // Include full answers for import
+                ];
+            }
+            
+            return $this->response
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => true,
+                    'data' => $jobRolesList,
+                    'message' => 'Orgtrakker job roles retrieved successfully',
+                ]));
+                
+        } catch (\Exception $e) {
+            Log::error('Error fetching orgtrakker job roles: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString()
+            ]);
+            return $this->response
+                ->withStatus(500)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Error fetching orgtrakker job roles: ' . $e->getMessage(),
+                ]));
+        }
+    }
+
+    /**
+     * Get orgtrakker role levels with import status
+     *
+     * @return \Cake\Http\Response
+     */
+    public function getOrgtrakkerRoleLevels()
+    {
+        $this->request->allowMethod(['get']);
+
+        // Authentication check
+        $authResult = $this->Authentication->getResult();
+        if (!$authResult || !$authResult->isValid()) {
+            return $this->response
+                ->withStatus(401)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Unauthorized access',
+                ]));
+        }
+
+        $companyId = $this->getCompanyId($authResult);
+
+        try {
+            $orgtrakkerCompanyId = $this->getOrgtrakkerCompanyId($companyId);
+            $connection = $this->getOrgtrakkerConnection($companyId);
+            
+            // Get all non-deleted role levels from orgtrakker
+            $stmt = $connection->execute(
+                'SELECT level_unique_id, name, rank, custom_fields
+                 FROM role_levels 
+                 WHERE company_id = :company_id AND deleted = false 
+                 ORDER BY rank ASC, name ASC',
+                ['company_id' => $orgtrakkerCompanyId]
+            );
+            
+            $orgtrakkerRoleLevels = $stmt->fetchAll('assoc');
+            
+            // Get scorecardtrakker role level template
+            $scorecardtrakkerTemplate = $this->getDefaultRoleLevelTemplate($companyId);
+            $scorecardtrakkerTemplateStructure = is_string($scorecardtrakkerTemplate->structure) 
+                ? json_decode($scorecardtrakkerTemplate->structure, true) 
+                : $scorecardtrakkerTemplate->structure;
+            
+            // Get orgtrakker template
+            $orgtrakkerTemplateStmt = $connection->execute(
+                'SELECT structure FROM level_templates WHERE company_id = :company_id AND deleted = false LIMIT 1',
+                ['company_id' => $orgtrakkerCompanyId]
+            );
+            $orgtrakkerTemplate = $orgtrakkerTemplateStmt->fetch('assoc');
+            $orgtrakkerTemplateStructure = $orgtrakkerTemplate ? json_decode($orgtrakkerTemplate['structure'], true) : [];
+            
+            // Get already imported role levels from current company with custom_fields, name, and rank
+            $RoleLevelsTable = $this->getTable('RoleLevels', $companyId);
+            $importedRoleLevels = $RoleLevelsTable
+                ->find()
+                ->select(['level_unique_id', 'custom_fields', 'name', 'rank'])
+                ->where([
+                    'company_id' => $companyId,
+                    'deleted' => false,
+                ])
+                ->toArray();
+            
+            // Create map of imported role levels
+            $importedRoleLevelsMap = [];
+            foreach ($importedRoleLevels as $imported) {
+                if (!empty($imported->level_unique_id)) {
+                    $importedRoleLevelsMap[$imported->level_unique_id] = $imported;
+                }
+            }
+            
+            // Process all role levels
+            $roleLevelsList = [];
+            foreach ($orgtrakkerRoleLevels as $roleLevel) {
+                $levelUniqueId = $roleLevel['level_unique_id'] ?? '';
+                
+                // Check if imported
+                $importedRoleLevel = $importedRoleLevelsMap[$levelUniqueId] ?? null;
+                $isImported = $importedRoleLevel !== null;
+                
+                // Determine status
+                $status = 'not_imported';
+                if ($isImported) {
+                    // Map orgtrakker custom_fields to scorecardtrakker structure
+                    // Treat rank/order like any other field - no special handling
+                    // Use the EXACT same logic as during import
+                    $orgtrakkerCustomFieldsRaw = $roleLevel['custom_fields'] ?? null;
+                    $orgtrakkerCustomFields = null;
+                    
+                    if (!empty($orgtrakkerCustomFieldsRaw)) {
+                        $orgtrakkerCustomFields = json_decode($orgtrakkerCustomFieldsRaw, true);
+                        if (!is_array($orgtrakkerCustomFields)) {
+                            $orgtrakkerCustomFields = [];
+                        }
+                    }
+                    
+                    // Use the same mapping logic as importAllRoleLevelsFromOrgtrakker
+                    if (!empty($orgtrakkerCustomFields) && is_array($orgtrakkerCustomFields) && !empty($orgtrakkerTemplateStructure) && !empty($scorecardtrakkerTemplateStructure)) {
+                        $orgtrakkerMapped = $this->mapFieldValuesByLabel($orgtrakkerCustomFields, $orgtrakkerTemplateStructure, $scorecardtrakkerTemplateStructure, $levelUniqueId);
+                    } elseif (!empty($scorecardtrakkerTemplateStructure)) {
+                        // If orgtrakker has no custom_fields, create empty structure (same as import)
+                        $orgtrakkerMapped = $this->mapFieldValuesByLabel([], [], $scorecardtrakkerTemplateStructure, $levelUniqueId);
+                    } else {
+                        $orgtrakkerMapped = $orgtrakkerCustomFields ?? [];
+                    }
+                    
+                    // Scorecardtrakker custom_fields are already in the correct structure
+                    $scorecardtrakkerCustomFields = is_string($importedRoleLevel->custom_fields) ? json_decode($importedRoleLevel->custom_fields, true) : $importedRoleLevel->custom_fields;
+                    if (!is_array($scorecardtrakkerCustomFields)) {
+                        $scorecardtrakkerCustomFields = [];
+                    }
+                    
+                    // Debug: Log what we're comparing - BEFORE comparison
+                    Log::debug("🔍 ROLE LEVEL COMPARISON DEBUG - BEFORE", [
+                        'level_unique_id' => $levelUniqueId,
+                        'orgtrakker_custom_fields_raw' => $orgtrakkerCustomFieldsRaw,
+                        'orgtrakker_custom_fields_parsed' => $orgtrakkerCustomFields,
+                        'orgtrakker_custom_fields_is_array' => is_array($orgtrakkerCustomFields),
+                        'orgtrakker_custom_fields_empty' => empty($orgtrakkerCustomFields),
+                        'orgtrakker_mapped' => $orgtrakkerMapped,
+                        'orgtrakker_mapped_is_array' => is_array($orgtrakkerMapped),
+                        'orgtrakker_mapped_empty' => empty($orgtrakkerMapped),
+                        'orgtrakker_mapped_keys' => is_array($orgtrakkerMapped) ? array_keys($orgtrakkerMapped) : 'not_array',
+                        'scorecardtrakker_custom_fields' => $scorecardtrakkerCustomFields,
+                        'scorecardtrakker_custom_fields_is_array' => is_array($scorecardtrakkerCustomFields),
+                        'scorecardtrakker_custom_fields_empty' => empty($scorecardtrakkerCustomFields),
+                        'scorecardtrakker_custom_fields_keys' => is_array($scorecardtrakkerCustomFields) ? array_keys($scorecardtrakkerCustomFields) : 'not_array',
+                        'orgtrakker_mapped_json' => json_encode($orgtrakkerMapped, JSON_PRETTY_PRINT),
+                        'scorecardtrakker_custom_fields_json' => json_encode($scorecardtrakkerCustomFields, JSON_PRETTY_PRINT),
+                        'templates_exist' => [
+                            'orgtrakker_template_structure' => !empty($orgtrakkerTemplateStructure),
+                            'scorecardtrakker_template_structure' => !empty($scorecardtrakkerTemplateStructure),
+                        ],
+                    ]);
+                    
+                    // Compare to detect if update is needed (exactly like employees and job roles)
+                    $comparisonDifferences = [];
+                    $needsUpdate = $this->compareMappedAnswers($orgtrakkerMapped, $scorecardtrakkerCustomFields, $scorecardtrakkerTemplateStructure, $orgtrakkerTemplateStructure, $comparisonDifferences);
+                    
+                    // Detailed debug logging to show EXACTLY what's different
+                    if ($needsUpdate) {
+                        Log::debug("🔍 ROLE LEVEL COMPARISON - DIFFERENCES FOUND", [
+                            'level_unique_id' => $levelUniqueId,
+                            'needsUpdate' => $needsUpdate,
+                            'differences_count' => count($comparisonDifferences),
+                            'differences' => $comparisonDifferences,
+                            'orgtrakker_mapped_structure' => $orgtrakkerMapped,
+                            'scorecardtrakker_custom_fields_structure' => $scorecardtrakkerCustomFields,
+                            'orgtrakker_keys' => array_keys($orgtrakkerMapped),
+                            'scorecardtrakker_keys' => array_keys($scorecardtrakkerCustomFields),
+                        ]);
+                        
+                        // Also log each difference individually for clarity
+                        foreach ($comparisonDifferences as $idx => $diff) {
+                            Log::debug("🔍 ROLE LEVEL DIFFERENCE #{$idx}", [
+                                'level_unique_id' => $levelUniqueId,
+                                'field_label' => $diff['label'] ?? 'unknown',
+                                'field_id' => $diff['fieldId'] ?? 'unknown',
+                                'location' => $diff['location'] ?? 'unknown',
+                                'orgtrakker_raw' => $diff['orgtrakker_value'] ?? null,
+                                'orgtrakker_normalized' => $diff['orgtrakker_normalized'] ?? '',
+                                'scorecardtrakker_raw' => $diff['scorecardtrakker_value'] ?? null,
+                                'scorecardtrakker_normalized' => $diff['scorecardtrakker_normalized'] ?? '',
+                                'are_equal' => ($diff['orgtrakker_normalized'] ?? '') === ($diff['scorecardtrakker_normalized'] ?? ''),
+                            ]);
+                        }
+                    } else {
+                        Log::debug("🔍 ROLE LEVEL COMPARISON - NO DIFFERENCES", [
+                            'level_unique_id' => $levelUniqueId,
+                            'needsUpdate' => false,
+                        ]);
+                    }
+                    
+                    // Also compare name and rank (these are direct column values, not in custom_fields)
+                    // Normalize name: trim whitespace and compare as strings
+                    $orgtrakkerName = trim((string)($roleLevel['name'] ?? ''));
+                    $scorecardtrakkerName = trim((string)($importedRoleLevel->name ?? ''));
+                    $nameChanged = $orgtrakkerName !== $scorecardtrakkerName;
+                    
+                    // Normalize rank: convert to integer for comparison (null becomes 0, but we'll handle null separately)
+                    $orgtrakkerRank = $roleLevel['rank'] ?? null;
+                    $scorecardtrakkerRank = $importedRoleLevel->rank ?? null;
+                    
+                    // Handle rank comparison: both null = same, both numeric = compare as numbers, otherwise compare as-is
+                    if ($orgtrakkerRank === null && $scorecardtrakkerRank === null) {
+                        $rankChanged = false;
+                    } elseif ($orgtrakkerRank === null || $scorecardtrakkerRank === null) {
+                        $rankChanged = true; // One is null, other is not
+                    } else {
+                        // Both have values, compare as integers (handles string "1" vs int 1)
+                        $rankChanged = (int)$orgtrakkerRank !== (int)$scorecardtrakkerRank;
+                    }
+                    
+                    // Detailed logging for name and rank comparison - use error_log for visibility
+                    error_log("🔍 ROLE LEVEL NAME/RANK COMPARISON - Level: {$levelUniqueId}");
+                    error_log("  Name - Org: '{$orgtrakkerName}' (type: " . gettype($orgtrakkerName) . ") vs Score: '{$scorecardtrakkerName}' (type: " . gettype($scorecardtrakkerName) . ") - Changed: " . ($nameChanged ? 'YES' : 'NO'));
+                    error_log("  Rank - Org: " . var_export($orgtrakkerRank, true) . " (type: " . gettype($orgtrakkerRank) . ") vs Score: " . var_export($scorecardtrakkerRank, true) . " (type: " . gettype($scorecardtrakkerRank) . ") - Changed: " . ($rankChanged ? 'YES' : 'NO'));
+                    error_log("  Rank normalized - Org int: " . ($orgtrakkerRank !== null ? (int)$orgtrakkerRank : 'NULL') . " vs Score int: " . ($scorecardtrakkerRank !== null ? (int)$scorecardtrakkerRank : 'NULL'));
+                    
+                    Log::debug("🔍 ROLE LEVEL NAME/RANK COMPARISON", [
+                        'level_unique_id' => $levelUniqueId,
+                        'orgtrakker_name' => $orgtrakkerName,
+                        'scorecardtrakker_name' => $scorecardtrakkerName,
+                        'nameChanged' => $nameChanged,
+                        'orgtrakker_rank' => $orgtrakkerRank,
+                        'scorecardtrakker_rank' => $scorecardtrakkerRank,
+                        'rankChanged' => $rankChanged,
+                        'rank_normalized_comparison' => [
+                            'orgtrakker_int' => $orgtrakkerRank !== null ? (int)$orgtrakkerRank : null,
+                            'scorecardtrakker_int' => $scorecardtrakkerRank !== null ? (int)$scorecardtrakkerRank : null,
+                            'are_equal' => !$rankChanged,
+                        ],
+                    ]);
+                    
+                    if ($needsUpdate || $nameChanged || $rankChanged) {
+                        $status = 'needs_update';
+                        Log::debug("🔍 ROLE LEVEL STATUS: needs_update", [
+                            'level_unique_id' => $levelUniqueId,
+                            'needsUpdate' => $needsUpdate,
+                            'nameChanged' => $nameChanged,
+                            'rankChanged' => $rankChanged,
+                            'reason' => $needsUpdate ? 'custom_fields_differ' : ($nameChanged ? 'name_differ' : 'rank_differ'),
+                        ]);
+                    } else {
+                        $status = 'imported';
+                    }
+                }
+                
+                $roleLevelsList[] = [
+                    'level_unique_id' => $levelUniqueId,
+                    'name' => $roleLevel['name'] ?? '',
+                    'rank' => $roleLevel['rank'] ?? null,
+                    'imported' => $isImported, // Keep for backward compatibility
+                    'status' => $status, // New: 'not_imported', 'imported', or 'needs_update'
+                ];
+            }
+            
+            return $this->response
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => true,
+                    'data' => $roleLevelsList,
+                    'message' => 'Orgtrakker role levels retrieved successfully',
+                ]));
+                
+        } catch (\Exception $e) {
+            Log::error('Error fetching orgtrakker role levels: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString()
+            ]);
+            return $this->response
+                ->withStatus(500)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Error fetching orgtrakker role levels: ' . $e->getMessage(),
+                ]));
+        }
+    }
+
+    /**
+     * Get orgtrakker employee reporting relationships with import status
+     *
+     * @return \Cake\Http\Response
+     */
+    public function getOrgtrakkerEmployeeReportingRelationships()
+    {
+        $this->request->allowMethod(['get']);
+
+        // Authentication check
+        $authResult = $this->Authentication->getResult();
+        if (!$authResult || !$authResult->isValid()) {
+            return $this->response
+                ->withStatus(401)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Unauthorized access',
+                ]));
+        }
+
+        $companyId = $this->getCompanyId($authResult);
+
+        try {
+            $orgtrakkerCompanyId = $this->getOrgtrakkerCompanyId($companyId);
+            $connection = $this->getOrgtrakkerConnection($companyId);
+            
+            // Get all non-deleted employee reporting relationships from orgtrakker
+            $stmt = $connection->execute(
+                'SELECT employee_unique_id, report_to_employee_unique_id
+                 FROM employee_reporting_relationships 
+                 WHERE company_id = :company_id AND deleted = false 
+                 ORDER BY employee_unique_id ASC',
+                ['company_id' => $orgtrakkerCompanyId]
+            );
+            
+            $orgtrakkerRelationships = $stmt->fetchAll('assoc');
+            
+            // Get employee names for display
+            $employeeStmt = $connection->execute(
+                'SELECT employee_unique_id, username, answers
+                 FROM employee_template_answers 
+                 WHERE company_id = :company_id AND deleted = false',
+                ['company_id' => $orgtrakkerCompanyId]
+            );
+            $employees = $employeeStmt->fetchAll('assoc');
+            
+            // Get orgtrakker employee template for extracting names
+            $orgtrakkerTemplateStmt = $connection->execute(
+                'SELECT structure FROM employee_templates WHERE company_id = :company_id AND name = :name AND deleted = false LIMIT 1',
+                ['company_id' => $orgtrakkerCompanyId, 'name' => 'employee']
+            );
+            $orgtrakkerTemplate = $orgtrakkerTemplateStmt->fetch('assoc');
+            $orgtrakkerTemplateStructure = $orgtrakkerTemplate ? json_decode($orgtrakkerTemplate['structure'], true) : [];
+            
+            // Create employee lookup
+            $employeeLookup = [];
+            foreach ($employees as $emp) {
+                $answers = json_decode($emp['answers'] ?? '{}', true);
+                $firstName = $this->extractFieldValueFromAnswers($answers, $orgtrakkerTemplateStructure, 'First Name');
+                $lastName = $this->extractFieldValueFromAnswers($answers, $orgtrakkerTemplateStructure, 'Last Name');
+                $employeeLookup[$emp['employee_unique_id']] = [
+                    'username' => $emp['username'] ?? '',
+                    'name' => trim(($firstName ?? '') . ' ' . ($lastName ?? '')),
+                ];
+            }
+            
+            // Get already imported relationships from current company
+            $EmployeeReportingRelationshipsTable = $this->getTable('EmployeeReportingRelationships', $companyId);
+            $importedRelationships = $EmployeeReportingRelationshipsTable
+                ->find()
+                ->select(['employee_unique_id', 'report_to_employee_unique_id'])
+                ->where([
+                    'company_id' => $companyId,
+                    'deleted' => false,
+                ])
+                ->toArray();
+            
+            // Create map of imported relationships by employee_unique_id
+            $importedRelationshipsMap = [];
+            foreach ($importedRelationships as $imported) {
+                $empId = $imported->employee_unique_id ?? '';
+                if (!empty($empId)) {
+                    $importedRelationshipsMap[$empId] = $imported->report_to_employee_unique_id ?? '';
+                }
+            }
+            
+            // Process all relationships
+            $relationshipsList = [];
+            foreach ($orgtrakkerRelationships as $relationship) {
+                $employeeUniqueId = $relationship['employee_unique_id'] ?? '';
+                $reportingTo = $relationship['report_to_employee_unique_id'] ?? '';
+                
+                // Check if imported and if relationship matches
+                $importedReportingTo = $importedRelationshipsMap[$employeeUniqueId] ?? null;
+                $isImported = $importedReportingTo !== null;
+                
+                // Determine status
+                $status = 'not_imported';
+                if ($isImported) {
+                    // Check if the reporting relationship matches
+                    if ($importedReportingTo === $reportingTo) {
+                        $status = 'imported';
+                    } else {
+                        // Relationship exists but points to different manager - needs update
+                        $status = 'needs_update';
+                    }
+                }
+                
+                $employeeName = $employeeLookup[$employeeUniqueId]['name'] ?? $employeeLookup[$employeeUniqueId]['username'] ?? $employeeUniqueId;
+                $reportingToName = $employeeLookup[$reportingTo]['name'] ?? $employeeLookup[$reportingTo]['username'] ?? $reportingTo;
+                
+                $relationshipsList[] = [
+                    'employee_unique_id' => $employeeUniqueId,
+                    'employee_name' => $employeeName,
+                    'reporting_to' => $reportingTo,
+                    'reporting_to_name' => $reportingToName,
+                    'imported' => $isImported, // Keep for backward compatibility
+                    'status' => $status, // New: 'not_imported', 'imported', or 'needs_update'
+                ];
+            }
+            
+            return $this->response
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => true,
+                    'data' => $relationshipsList,
+                    'message' => 'Orgtrakker employee reporting relationships retrieved successfully',
+                ]));
+                
+        } catch (\Exception $e) {
+            Log::error('Error fetching orgtrakker employee reporting relationships: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString()
+            ]);
+            return $this->response
+                ->withStatus(500)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Error fetching orgtrakker employee reporting relationships: ' . $e->getMessage(),
+                ]));
+        }
+    }
+
+    /**
+     * Get orgtrakker job role reporting relationships with import status
+     *
+     * @return \Cake\Http\Response
+     */
+    public function getOrgtrakkerJobRoleReportingRelationships()
+    {
+        $this->request->allowMethod(['get']);
+
+        // Authentication check
+        $authResult = $this->Authentication->getResult();
+        if (!$authResult || !$authResult->isValid()) {
+            return $this->response
+                ->withStatus(401)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Unauthorized access',
+                ]));
+        }
+
+        $companyId = $this->getCompanyId($authResult);
+
+        try {
+            $orgtrakkerCompanyId = $this->getOrgtrakkerCompanyId($companyId);
+            $connection = $this->getOrgtrakkerConnection($companyId);
+            
+            // Get all non-deleted job role reporting relationships from orgtrakker
+            $stmt = $connection->execute(
+                'SELECT job_role, reporting_to
+                 FROM job_role_reporting_relationships 
+                 WHERE company_id = :company_id AND deleted = false 
+                 ORDER BY job_role ASC',
+                ['company_id' => $orgtrakkerCompanyId]
+            );
+            
+            $orgtrakkerRelationships = $stmt->fetchAll('assoc');
+            
+            // Get job role names for display
+            $jobRoleStmt = $connection->execute(
+                'SELECT job_role_unique_id, answers
+                 FROM job_role_template_answers 
+                 WHERE company_id = :company_id AND deleted = false',
+                ['company_id' => $orgtrakkerCompanyId]
+            );
+            $jobRoles = $jobRoleStmt->fetchAll('assoc');
+            
+            // Get orgtrakker job role template for extracting names
+            $orgtrakkerTemplateStmt = $connection->execute(
+                'SELECT structure FROM job_role_templates WHERE company_id = :company_id AND deleted = false LIMIT 1',
+                ['company_id' => $orgtrakkerCompanyId]
+            );
+            $orgtrakkerTemplate = $orgtrakkerTemplateStmt->fetch('assoc');
+            $orgtrakkerTemplateStructure = $orgtrakkerTemplate ? json_decode($orgtrakkerTemplate['structure'], true) : [];
+            
+            // Create job role lookup
+            $jobRoleLookup = [];
+            foreach ($jobRoles as $jr) {
+                $answers = json_decode($jr['answers'] ?? '{}', true);
+                $jobRoleName = $this->extractFieldValueFromAnswers($answers, $orgtrakkerTemplateStructure, 'Job Role');
+                if (!$jobRoleName) {
+                    $jobRoleName = $this->extractFieldValueFromAnswers($answers, $orgtrakkerTemplateStructure, 'Official Designation');
+                }
+                if (!$jobRoleName) {
+                    $jobRoleName = $this->extractFieldValueFromAnswers($answers, $orgtrakkerTemplateStructure, 'Job Title');
+                }
+                $jobRoleLookup[$jr['job_role_unique_id']] = $jobRoleName ?? $jr['job_role_unique_id'];
+            }
+            
+            // Get already imported relationships from current company
+            $JobRoleReportingRelationshipsTable = $this->getTable('JobRoleReportingRelationships', $companyId);
+            $importedRelationships = $JobRoleReportingRelationshipsTable
+                ->find()
+                ->select(['job_role', 'reporting_to'])
+                ->where([
+                    'company_id' => $companyId,
+                    'deleted' => false,
+                ])
+                ->toArray();
+            
+            // Create map of imported relationships by job_role
+            $importedRelationshipsMap = [];
+            foreach ($importedRelationships as $imported) {
+                $jrId = $imported->job_role ?? '';
+                if (!empty($jrId)) {
+                    $importedRelationshipsMap[$jrId] = $imported->reporting_to ?? '';
+                }
+            }
+            
+            // Process all relationships
+            $relationshipsList = [];
+            foreach ($orgtrakkerRelationships as $relationship) {
+                $jobRole = $relationship['job_role'] ?? '';
+                $reportingTo = $relationship['reporting_to'] ?? '';
+                
+                // Check if imported and if relationship matches
+                $importedReportingTo = $importedRelationshipsMap[$jobRole] ?? null;
+                $isImported = $importedReportingTo !== null;
+                
+                // Determine status
+                $status = 'not_imported';
+                if ($isImported) {
+                    // Check if the reporting relationship matches
+                    if ($importedReportingTo === $reportingTo) {
+                        $status = 'imported';
+                    } else {
+                        // Relationship exists but points to different job role - needs update
+                        $status = 'needs_update';
+                    }
+                }
+                
+                $jobRoleName = $jobRoleLookup[$jobRole] ?? $jobRole;
+                $reportingToName = $jobRoleLookup[$reportingTo] ?? $reportingTo;
+                
+                $relationshipsList[] = [
+                    'job_role' => $jobRole,
+                    'job_role_name' => $jobRoleName,
+                    'reporting_to' => $reportingTo,
+                    'reporting_to_name' => $reportingToName,
+                    'imported' => $isImported, // Keep for backward compatibility
+                    'status' => $status, // New: 'not_imported', 'imported', or 'needs_update'
+                ];
+            }
+            
+            return $this->response
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => true,
+                    'data' => $relationshipsList,
+                    'message' => 'Orgtrakker job role reporting relationships retrieved successfully',
+                ]));
+                
+        } catch (\Exception $e) {
+            Log::error('Error fetching orgtrakker job role reporting relationships: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString()
+            ]);
+            return $this->response
+                ->withStatus(500)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Error fetching orgtrakker job role reporting relationships: ' . $e->getMessage(),
+                ]));
+        }
+    }
+
+    /**
+     * Get default job role template for company
+     *
+     * @param string $companyId
+     * @return \App\Model\Entity\JobRoleTemplate
+     * @throws Exception
+     */
+    private function getDefaultJobRoleTemplate($companyId)
+    {
+        $JobRoleTemplatesTable = $this->getTable('JobRoleTemplates', $companyId);
+        $template = $JobRoleTemplatesTable
+            ->find()
+            ->where([
+                'company_id' => $companyId,
+                'deleted' => false,
+            ])
+            ->first();
+
+        if (!$template) {
+            throw new Exception('Default job role template not found. Please create a job role template first.');
+        }
+        return $template;
+    }
+
+    /**
+     * Get default role level template for company
+     *
+     * @param string $companyId
+     * @return \App\Model\Entity\LevelTemplate
+     * @throws Exception
+     */
+    private function getDefaultRoleLevelTemplate($companyId)
+    {
+        $LevelTemplatesTable = $this->getTable('LevelTemplates', $companyId);
+        $template = $LevelTemplatesTable
+            ->find()
+            ->where([
+                'company_id' => $companyId,
+                'deleted' => false,
+            ])
+            ->first();
+
+        if (!$template) {
+            throw new Exception('Default role level template not found. Please create a role level template first.');
+        }
+        return $template;
+    }
+
+    /**
+     * Map field values from orgtrakker answers to scorecardtrakker template structure by matching field labels
+     *
+     * @param array $orgtrakkerAnswers
+     * @param array $orgtrakkerTemplate
+     * @param array $scorecardtrakkerTemplate
+     * @param string|null $debugIdentifier Optional identifier for debugging
+     * @return array
+     */
+    private function mapFieldValuesByLabel($orgtrakkerAnswers, $orgtrakkerTemplate, $scorecardtrakkerTemplate, $debugIdentifier = null)
+    {
+        // Build answer structure based on scorecardtrakker template (target structure)
+        $mappedAnswers = [];
+        
+        // Create a flat mapping of orgtrakker fields: label -> value (from answers)
+        $orgtrakkerFieldMap = [];
+        $orgtrakkerFieldDetails = []; // For debugging: store full details
+        
+        foreach ($orgtrakkerTemplate as $group) {
+            $groupId = $group['id'] ?? null;
+            if (!$groupId) continue;
+            
+            // Map regular fields
+            if (isset($group['fields']) && is_array($group['fields'])) {
+                foreach ($group['fields'] as $field) {
+                    $fieldId = $field['id'] ?? null;
+                    if (!$fieldId) continue;
+                    
+                    // Use 'label' ONLY for mapping (not 'customize_field_label')
+                    // customize_field_label is a custom name that can be anything and has no relation to field matching
+                    $label = $field['label'] ?? '';
+                    if (empty($label)) continue;
+                    
+                    // Use extractFieldValueFromAnswers to find value by label (more robust than direct ID access)
+                    // This searches by label ONLY, ensuring consistent matching across templates
+                    $value = $this->extractFieldValueFromAnswers($orgtrakkerAnswers, $orgtrakkerTemplate, $label);
+                    
+                    // Special debug logging for rank/order related fields
+                    $isRankOrderField = (
+                        stripos($label, 'rank') !== false || 
+                        stripos($label, 'order') !== false ||
+                        stripos($label, 'rank/order') !== false ||
+                        stripos($label, 'rank order') !== false
+                    );
+                    
+                    // Special debug logging for Reports To field
+                    $isReportsToField = (strcasecmp($label, 'Reports To') === 0);
+                    
+                    if ($isRankOrderField) {
+                        Log::debug("🔍 ROLE LEVEL MAPPING - Rank/Order field extraction from orgtrakker", [
+                            'debug_id' => $debugIdentifier,
+                            'field_label' => $label,
+                            'field_id' => $fieldId,
+                            'field_type' => $field['type'] ?? 'unknown',
+                            'extracted_value' => $value,
+                            'extracted_value_type' => gettype($value),
+                            'extracted_value_is_null' => $value === null,
+                        ]);
+                    }
+                    
+                    if ($isReportsToField) {
+                        Log::debug("🔍 EMPLOYEE IMPORT - Reports To field extraction from orgtrakker", [
+                            'debug_id' => $debugIdentifier,
+                            'field_label' => $label,
+                            'field_id' => $fieldId,
+                            'field_type' => $field['type'] ?? 'unknown',
+                            'extracted_value' => $value,
+                            'extracted_value_type' => gettype($value),
+                            'extracted_value_is_null' => $value === null,
+                            'extracted_value_is_empty_string' => $value === '',
+                            'extracted_value_string' => (string)$value,
+                            'orgtrakker_answers_sample' => is_array($orgtrakkerAnswers) ? array_keys($orgtrakkerAnswers) : 'not_array',
+                        ]);
+                        // Also use error_log for visibility
+                        error_log("🔍 REPORTS TO EXTRACTION - Employee: {$debugIdentifier}, Label: {$label}, Value: " . ($value !== null ? (string)$value : 'NULL') . ", Type: " . gettype($value));
+                    }
+                    
+                    // Include value in map even if it's an empty string (empty string is a valid value)
+                    // Only skip if value is null (field not found)
+                    if ($value !== null) {
+                        $labelLower = strtolower($label);
+                        // Store details for debugging
+                        $orgtrakkerFieldDetails[] = [
+                            'label' => $label,
+                            'label_lower' => $labelLower,
+                            'field_id' => $fieldId,
+                            'group_id' => $groupId,
+                            'value' => $value,
+                            'value_type' => gettype($value),
+                        ];
+                        
+                        // WARNING: If duplicate labels exist, last one wins
+                        if (isset($orgtrakkerFieldMap[$labelLower])) {
+                            Log::warning("🔍 ROLE LEVEL MAPPING - Duplicate label found in orgtrakker", [
+                                'debug_id' => $debugIdentifier,
+                                'label' => $label,
+                                'label_lower' => $labelLower,
+                                'old_value' => $orgtrakkerFieldMap[$labelLower],
+                                'new_value' => $value,
+                                'old_field_id' => $orgtrakkerFieldDetails[count($orgtrakkerFieldDetails) - 2]['field_id'] ?? 'unknown',
+                                'new_field_id' => $fieldId,
+                            ]);
+                        }
+                        $orgtrakkerFieldMap[$labelLower] = $value;
+                    }
+                }
+            }
+            
+            // Map subGroup fields (ignore subGroup structure, just map individual fields)
+            if (isset($group['subGroups']) && is_array($group['subGroups'])) {
+                foreach ($group['subGroups'] as $subGroup) {
+                    $subGroupId = $subGroup['id'] ?? null;
+                    if (!$subGroupId) continue;
+                    
+                    if (isset($subGroup['fields']) && is_array($subGroup['fields'])) {
+                        foreach ($subGroup['fields'] as $field) {
+                            $fieldId = $field['id'] ?? null;
+                            if (!$fieldId) continue;
+                            
+                            // Use 'label' ONLY for mapping (not 'customize_field_label')
+                            // customize_field_label is a custom name that can be anything and has no relation to field matching
+                            $label = $field['label'] ?? '';
+                            if (empty($label)) continue;
+                            
+                            // Use extractFieldValueFromAnswers to find value by label (more robust than direct ID access)
+                            // This handles subgroups automatically by searching through the template structure
+                            // This searches by label ONLY, ensuring consistent matching across templates
+                            $value = $this->extractFieldValueFromAnswers($orgtrakkerAnswers, $orgtrakkerTemplate, $label);
+                            
+                            if ($value !== null) {
+                                $labelLower = strtolower($label);
+                                // Store details for debugging
+                                $orgtrakkerFieldDetails[] = [
+                                    'label' => $label,
+                                    'label_lower' => $labelLower,
+                                    'field_id' => $fieldId,
+                                    'subgroup_id' => $subGroupId,
+                                    'value' => $value,
+                                ];
+                                
+                                // WARNING: If duplicate labels exist, last one wins
+                                if (isset($orgtrakkerFieldMap[$labelLower])) {
+                                    Log::warning("🔍 ROLE LEVEL MAPPING - Duplicate label found in orgtrakker (subgroup)", [
+                                        'debug_id' => $debugIdentifier,
+                                        'label' => $label,
+                                        'label_lower' => $labelLower,
+                                        'old_value' => $orgtrakkerFieldMap[$labelLower],
+                                        'new_value' => $value,
+                                    ]);
+                                }
+                                $orgtrakkerFieldMap[$labelLower] = $value;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        Log::debug("🔍 ROLE LEVEL MAPPING - Orgtrakker field map built", [
+            'debug_id' => $debugIdentifier,
+            'orgtrakker_field_map' => $orgtrakkerFieldMap,
+            'orgtrakker_field_details' => $orgtrakkerFieldDetails,
+        ]);
+        
+        // Now build scorecardtrakker answer structure and map values
+        $scorecardtrakkerFieldDetails = []; // For debugging
+        
+        foreach ($scorecardtrakkerTemplate as $group) {
+            $groupId = $group['id'] ?? null;
+            if (!$groupId) continue;
+            
+            $mappedAnswers[$groupId] = [];
+            
+            // Map regular fields
+            if (isset($group['fields']) && is_array($group['fields'])) {
+                foreach ($group['fields'] as $field) {
+                    $fieldId = $field['id'] ?? null;
+                    if (!$fieldId) continue;
+                    
+                    // Use 'label' ONLY for mapping (not 'customize_field_label')
+                    // customize_field_label is a custom name that can be anything and has no relation to field matching
+                    $label = $field['label'] ?? '';
+                    if (empty($label)) {
+                        $mappedAnswers[$groupId][$fieldId] = '';
+                        continue;
+                    }
+                    
+                    $labelLower = strtolower($label);
+                    // Find matching value from orgtrakker
+                    $value = $orgtrakkerFieldMap[$labelLower] ?? '';
+                    $mappedAnswers[$groupId][$fieldId] = $value;
+                    
+                    // Special debug logging for rank/order related fields
+                    $isRankOrderField = (
+                        stripos($label, 'rank') !== false || 
+                        stripos($label, 'order') !== false ||
+                        stripos($label, 'rank/order') !== false ||
+                        stripos($label, 'rank order') !== false
+                    );
+                    
+                    // Special debug logging for Reports To field
+                    $isReportsToField = (strcasecmp($label, 'Reports To') === 0);
+                    
+                    if ($isRankOrderField) {
+                        Log::debug("🔍 ROLE LEVEL MAPPING - Rank/Order field mapping", [
+                            'debug_id' => $debugIdentifier,
+                            'field_label' => $label,
+                            'field_label_lower' => $labelLower,
+                            'field_id' => $fieldId,
+                            'field_type' => $field['type'] ?? 'unknown',
+                            'found_in_orgtrakker' => isset($orgtrakkerFieldMap[$labelLower]),
+                            'mapped_value' => $value,
+                            'mapped_value_type' => gettype($value),
+                            'available_orgtrakker_labels' => array_keys($orgtrakkerFieldMap),
+                        ]);
+                    }
+                    
+                    if ($isReportsToField) {
+                        Log::debug("🔍 EMPLOYEE IMPORT - Reports To field mapping to scorecardtrakker", [
+                            'debug_id' => $debugIdentifier,
+                            'field_label' => $label,
+                            'field_label_lower' => $labelLower,
+                            'field_id' => $fieldId,
+                            'field_type' => $field['type'] ?? 'unknown',
+                            'found_in_orgtrakker' => isset($orgtrakkerFieldMap[$labelLower]),
+                            'mapped_value' => $value,
+                            'mapped_value_type' => gettype($value),
+                            'mapped_value_string' => (string)$value,
+                            'mapped_value_is_empty' => empty($value),
+                            'available_orgtrakker_labels' => array_keys($orgtrakkerFieldMap),
+                            'orgtrakker_field_map_reports_to' => $orgtrakkerFieldMap[$labelLower] ?? 'NOT_FOUND',
+                        ]);
+                        // Also use error_log for visibility
+                        $foundInMap = isset($orgtrakkerFieldMap[$labelLower]);
+                        $mapValue = $orgtrakkerFieldMap[$labelLower] ?? 'NOT_IN_MAP';
+                        error_log("🔍 REPORTS TO MAPPING - Employee: {$debugIdentifier}, Label: {$label} (lower: {$labelLower}), Found in map: " . ($foundInMap ? 'YES' : 'NO') . ", Map value: {$mapValue}, Final mapped value: " . (string)$value . ", Available labels: " . implode(', ', array_keys($orgtrakkerFieldMap)));
+                    }
+                    
+                    // Store details for debugging
+                    $scorecardtrakkerFieldDetails[] = [
+                        'label' => $label,
+                        'label_lower' => $labelLower,
+                        'field_id' => $fieldId,
+                        'group_id' => $groupId,
+                        'mapped_value' => $value,
+                        'found_in_orgtrakker' => isset($orgtrakkerFieldMap[$labelLower]),
+                    ];
+                }
+            }
+            
+            // Map subGroup fields (preserve structure but map values)
+            if (isset($group['subGroups']) && is_array($group['subGroups'])) {
+                foreach ($group['subGroups'] as $index => $subGroup) {
+                    $subGroupId = $subGroup['id'] ?? null;
+                    if (!$subGroupId) continue;
+                    
+                    // Use pattern {groupLabel}_{index} for subGroups
+                    $groupLabel = $group['label'] ?? $group['id'];
+                    $subGroupLabel = "{$groupLabel}_{$index}";
+                    $mappedAnswers[$subGroupLabel] = [];
+                    
+                    if (isset($subGroup['fields']) && is_array($subGroup['fields'])) {
+                        foreach ($subGroup['fields'] as $field) {
+                            $fieldId = $field['id'] ?? null;
+                            if (!$fieldId) continue;
+                            
+                            // Use 'label' ONLY for mapping (not 'customize_field_label')
+                            // customize_field_label is a custom name that can be anything and has no relation to field matching
+                            $label = $field['label'] ?? '';
+                            if (empty($label)) {
+                                $mappedAnswers[$subGroupLabel][$fieldId] = '';
+                                continue;
+                            }
+                            
+                            $labelLower = strtolower($label);
+                            // Find matching value from orgtrakker
+                            $value = $orgtrakkerFieldMap[$labelLower] ?? '';
+                            $mappedAnswers[$subGroupLabel][$fieldId] = $value;
+                            
+                            // Store details for debugging
+                            $scorecardtrakkerFieldDetails[] = [
+                                'label' => $label,
+                                'label_lower' => $labelLower,
+                                'field_id' => $fieldId,
+                                'subgroup_id' => $subGroupId,
+                                'subgroup_label' => $subGroupLabel,
+                                'mapped_value' => $value,
+                                'found_in_orgtrakker' => isset($orgtrakkerFieldMap[$labelLower]),
+                            ];
+                        }
+                    }
+                }
+            }
+        }
+        
+        Log::debug("🔍 ROLE LEVEL MAPPING - Scorecardtrakker mapping complete", [
+            'debug_id' => $debugIdentifier,
+            'scorecardtrakker_field_details' => $scorecardtrakkerFieldDetails,
+            'final_mapped_structure' => $mappedAnswers,
+        ]);
+        
+        // SPECIAL HANDLING: If this is an employee import and we have a Reports To value in the orgtrakker field map,
+        // ensure it's in the mapped answers even if mapping failed
+        // This is a safety net in case the field wasn't found during normal mapping
+        if ($debugIdentifier && isset($orgtrakkerFieldMap['reports to'])) {
+            $reportsToValue = $orgtrakkerFieldMap['reports to'];
+            if ($reportsToValue !== null && $reportsToValue !== '') {
+                // Try to find Reports To field in scorecardtrakker template and set it
+                foreach ($scorecardtrakkerTemplate as $group) {
+                    // Check regular fields
+                    foreach ($group['fields'] ?? [] as $field) {
+                        $fieldLabel = $field['label'] ?? '';
+                        if (!empty($fieldLabel) && strcasecmp($fieldLabel, 'Reports To') === 0) {
+                            $groupId = $group['id'];
+                            $fieldId = $field['id'];
+                            if (!isset($mappedAnswers[$groupId])) {
+                                $mappedAnswers[$groupId] = [];
+                            }
+                            // Only set if current value is empty
+                            if (empty($mappedAnswers[$groupId][$fieldId])) {
+                                $mappedAnswers[$groupId][$fieldId] = $reportsToValue;
+                                error_log("🔍 MAP FIELD VALUES - Reports To value set in mapped answers (safety net) - Group: {$groupId}, Field: {$fieldId}, Value: {$reportsToValue}");
+                            }
+                            break 2;
+                        }
+                    }
+                    
+                    // Check subgroups
+                    if (isset($group['subGroups']) && is_array($group['subGroups'])) {
+                        $groupLabel = $group['label'] ?? $group['id'];
+                        foreach ($group['subGroups'] as $index => $subGroup) {
+                            foreach ($subGroup['fields'] ?? [] as $field) {
+                                $fieldLabel = $field['label'] ?? '';
+                                if (!empty($fieldLabel) && strcasecmp($fieldLabel, 'Reports To') === 0) {
+                                    $subGroupLabel = "{$groupLabel}_{$index}";
+                                    $fieldId = $field['id'];
+                                    if (!isset($mappedAnswers[$subGroupLabel])) {
+                                        $mappedAnswers[$subGroupLabel] = [];
+                                    }
+                                    // Only set if current value is empty
+                                    if (empty($mappedAnswers[$subGroupLabel][$fieldId])) {
+                                        $mappedAnswers[$subGroupLabel][$fieldId] = $reportsToValue;
+                                        error_log("🔍 MAP FIELD VALUES - Reports To value set in mapped answers (safety net, subgroup) - SubGroup: {$subGroupLabel}, Field: {$fieldId}, Value: {$reportsToValue}");
+                                    }
+                                    break 3;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        return $mappedAnswers;
+    }
+
+    /**
+     * Ensure rank/order field is mapped from rank column if not found in custom_fields
+     *
+     * @param array &$customFields Reference to the custom fields array to update
+     * @param array $scorecardtrakkerTemplateStructure
+     * @param mixed $rankColumnValue The rank value from the rank column
+     * @param string $debugIdentifier For logging
+     * @param bool $forceOverwrite If true, always use rank column value even if field exists
+     * @return void
+     */
+    private function ensureRankOrderFieldMapped(&$customFields, $scorecardtrakkerTemplateStructure, $rankColumnValue, $debugIdentifier = null, $forceOverwrite = false)
+    {
+        if ($rankColumnValue === null || empty($scorecardtrakkerTemplateStructure)) {
+            return;
+        }
+        
+        // Search for rank/order field in scorecardtrakker template
+        foreach ($scorecardtrakkerTemplateStructure as $group) {
+            $groupId = $group['id'] ?? null;
+            if (!$groupId) continue;
+            
+            // Check regular fields
+            if (isset($group['fields']) && is_array($group['fields'])) {
+                foreach ($group['fields'] as $field) {
+                    $fieldId = $field['id'] ?? null;
+                    if (!$fieldId) continue;
+                    
+                    // Use 'label' ONLY (not 'customize_field_label')
+                    // customize_field_label is a custom name that can be anything and has no relation to field matching
+                    $label = $field['label'] ?? '';
+                    $fieldType = $field['type'] ?? 'text';
+                    
+                    // Check if this is a rank/order field
+                    $isRankOrderField = (
+                        stripos($label, 'rank') !== false && 
+                        (stripos($label, 'order') !== false || stripos($label, '/') !== false)
+                    ) || (
+                        stripos($label, 'rank/order') !== false ||
+                        stripos($label, 'rank order') !== false
+                    );
+                    
+                    if ($isRankOrderField) {
+                        // Check if field is already mapped and has a value
+                        $currentValue = $customFields[$groupId][$fieldId] ?? null;
+                        
+                        // If not mapped or empty, or if forceOverwrite is true, use rank column value
+                        if ($forceOverwrite || $currentValue === null || $currentValue === '') {
+                            // Convert type if needed
+                            $value = $rankColumnValue;
+                            if ($fieldType === 'text' && is_numeric($value)) {
+                                $value = (string)$value;
+                            } elseif ($fieldType === 'number' && !is_numeric($value)) {
+                                $value = is_numeric($value) ? (int)$value : null;
+                            }
+                            
+                            if ($value !== null) {
+                                if (!isset($customFields[$groupId])) {
+                                    $customFields[$groupId] = [];
+                                }
+                                $customFields[$groupId][$fieldId] = $value;
+                                
+                                Log::debug("🔍 ROLE LEVEL MAPPING - Rank/Order field mapped from rank column", [
+                                    'debug_id' => $debugIdentifier,
+                                    'field_label' => $label,
+                                    'field_id' => $fieldId,
+                                    'field_type' => $fieldType,
+                                    'rank_column_value' => $rankColumnValue,
+                                    'mapped_value' => $value,
+                                    'mapped_value_type' => gettype($value),
+                                ]);
+                            }
+                        } else {
+                            Log::debug("🔍 ROLE LEVEL MAPPING - Rank/Order field already has value", [
+                                'debug_id' => $debugIdentifier,
+                                'field_label' => $label,
+                                'field_id' => $fieldId,
+                                'current_value' => $currentValue,
+                                'rank_column_value' => $rankColumnValue,
+                            ]);
+                        }
+                    }
+                }
+            }
+            
+            // Check subGroup fields
+            if (isset($group['subGroups']) && is_array($group['subGroups'])) {
+                foreach ($group['subGroups'] as $index => $subGroup) {
+                    $subGroupId = $subGroup['id'] ?? null;
+                    if (!$subGroupId) continue;
+                    
+                    $groupLabel = $group['label'] ?? $group['id'];
+                    $subGroupLabel = "{$groupLabel}_{$index}";
+                    
+                    if (isset($subGroup['fields']) && is_array($subGroup['fields'])) {
+                        foreach ($subGroup['fields'] as $field) {
+                            $fieldId = $field['id'] ?? null;
+                            if (!$fieldId) continue;
+                            
+                            // Use 'label' ONLY (not 'customize_field_label')
+                            // customize_field_label is a custom name that can be anything and has no relation to field matching
+                            $label = $field['label'] ?? '';
+                            $fieldType = $field['type'] ?? 'text';
+                            
+                            // Check if this is a rank/order field
+                            $isRankOrderField = (
+                                stripos($label, 'rank') !== false && 
+                                (stripos($label, 'order') !== false || stripos($label, '/') !== false)
+                            ) || (
+                                stripos($label, 'rank/order') !== false ||
+                                stripos($label, 'rank order') !== false
+                            );
+                            
+                            if ($isRankOrderField) {
+                                // Check if field is already mapped and has a value
+                                $currentValue = $customFields[$subGroupLabel][$fieldId] ?? null;
+                                
+                                // If not mapped or empty, or if forceOverwrite is true, use rank column value
+                                if ($forceOverwrite || $currentValue === null || $currentValue === '') {
+                                    // Convert type if needed
+                                    $value = $rankColumnValue;
+                                    if ($fieldType === 'text' && is_numeric($value)) {
+                                        $value = (string)$value;
+                                    } elseif ($fieldType === 'number' && !is_numeric($value)) {
+                                        $value = is_numeric($value) ? (int)$value : null;
+                                    }
+                                    
+                                    if ($value !== null) {
+                                        if (!isset($customFields[$subGroupLabel])) {
+                                            $customFields[$subGroupLabel] = [];
+                                        }
+                                        $customFields[$subGroupLabel][$fieldId] = $value;
+                                        
+                                        Log::debug("🔍 ROLE LEVEL MAPPING - Rank/Order field mapped from rank column (subgroup)", [
+                                            'debug_id' => $debugIdentifier,
+                                            'field_label' => $label,
+                                            'field_id' => $fieldId,
+                                            'field_type' => $fieldType,
+                                            'subgroup_label' => $subGroupLabel,
+                                            'rank_column_value' => $rankColumnValue,
+                                            'mapped_value' => $value,
+                                            'mapped_value_type' => gettype($value),
+                                        ]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Compare mapped answers between orgtrakker and scorecardtrakker to detect inconsistencies
+     *
+     * @param array $orgtrakkerMappedAnswers Mapped answers from orgtrakker
+     * @param array $scorecardtrakkerMappedAnswers Mapped answers from scorecardtrakker
+     * @param array $scorecardtrakkerTemplate Template structure from scorecardtrakker
+     * @param array $orgtrakkerTemplate Template structure from orgtrakker (for label matching)
+     * @return bool True if any field values differ, false if all match
+     */
+    private function compareMappedAnswers($orgtrakkerMappedAnswers, $scorecardtrakkerMappedAnswers, $scorecardtrakkerTemplate, $orgtrakkerTemplate, &$differences = null)
+    {
+        $differences = [];
+        
+        if (empty($orgtrakkerMappedAnswers) && empty($scorecardtrakkerMappedAnswers)) {
+            return false; // Both empty, no difference
+        }
+        
+        // Validate inputs
+        if (!is_array($orgtrakkerTemplate) || !is_array($scorecardtrakkerTemplate)) {
+            return false; // Can't compare without templates
+        }
+        
+        if (!is_array($orgtrakkerMappedAnswers)) {
+            $orgtrakkerMappedAnswers = [];
+        }
+        if (!is_array($scorecardtrakkerMappedAnswers)) {
+            $scorecardtrakkerMappedAnswers = [];
+        }
+        
+        // Create a map of orgtrakker labels for quick lookup
+        $orgtrakkerLabelMap = [];
+        foreach ($orgtrakkerTemplate as $group) {
+            if (isset($group['fields']) && is_array($group['fields'])) {
+                foreach ($group['fields'] as $field) {
+                    $label = $field['label'] ?? '';
+                    if (!empty($label)) {
+                        $orgtrakkerLabelMap[strtolower($label)] = true;
+                    }
+                }
+            }
+            // Also check subgroups
+            if (isset($group['subGroups']) && is_array($group['subGroups'])) {
+                foreach ($group['subGroups'] as $subGroup) {
+                    if (isset($subGroup['fields']) && is_array($subGroup['fields'])) {
+                        foreach ($subGroup['fields'] as $field) {
+                            $label = $field['label'] ?? '';
+                            if (!empty($label)) {
+                                $orgtrakkerLabelMap[strtolower($label)] = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Iterate through scorecardtrakker template and compare values
+        foreach ($scorecardtrakkerTemplate as $group) {
+            $groupId = $group['id'] ?? null;
+            if (!$groupId) continue;
+            
+            // Check regular fields
+            if (isset($group['fields']) && is_array($group['fields'])) {
+                foreach ($group['fields'] as $field) {
+                    $fieldId = $field['id'] ?? null;
+                    $label = $field['label'] ?? '';
+                    
+                    if (!$fieldId || empty($label)) continue;
+                    
+                    // Only compare if this label exists in orgtrakker template
+                    if (!isset($orgtrakkerLabelMap[strtolower($label)])) {
+                        continue; // Skip fields that don't exist in orgtrakker
+                    }
+                    
+                    // Get values from both mapped answers
+                    $orgtrakkerValue = $orgtrakkerMappedAnswers[$groupId][$fieldId] ?? null;
+                    $scorecardtrakkerValue = $scorecardtrakkerMappedAnswers[$groupId][$fieldId] ?? null;
+                    
+                    // Normalize values for comparison
+                    $orgtrakkerNormalized = $this->normalizeValueForComparison($orgtrakkerValue);
+                    $scorecardtrakkerNormalized = $this->normalizeValueForComparison($scorecardtrakkerValue);
+                    
+                    // Compare values
+                    if ($orgtrakkerNormalized !== $scorecardtrakkerNormalized) {
+                        $differences[] = [
+                            'location' => 'group',
+                            'groupId' => $groupId,
+                            'fieldId' => $fieldId,
+                            'label' => $label,
+                            'orgtrakker_value' => $orgtrakkerValue,
+                            'orgtrakker_normalized' => $orgtrakkerNormalized,
+                            'scorecardtrakker_value' => $scorecardtrakkerValue,
+                            'scorecardtrakker_normalized' => $scorecardtrakkerNormalized,
+                        ];
+                    }
+                }
+            }
+            
+            // Check subgroups
+            if (isset($group['subGroups']) && is_array($group['subGroups'])) {
+                $groupLabel = $group['label'] ?? $group['id'];
+                foreach ($group['subGroups'] as $index => $subGroup) {
+                    $subGroupLabel = "{$groupLabel}_{$index}";
+                    
+                    if (isset($subGroup['fields']) && is_array($subGroup['fields'])) {
+                        foreach ($subGroup['fields'] as $field) {
+                            $fieldId = $field['id'] ?? null;
+                            $label = $field['label'] ?? '';
+                            
+                            if (!$fieldId || empty($label)) continue;
+                            
+                            // Only compare if this label exists in orgtrakker template
+                            if (!isset($orgtrakkerLabelMap[strtolower($label)])) {
+                                continue;
+                            }
+                            
+                            // Get values from both mapped answers
+                            $orgtrakkerValue = $orgtrakkerMappedAnswers[$subGroupLabel][$fieldId] ?? null;
+                            $scorecardtrakkerValue = $scorecardtrakkerMappedAnswers[$subGroupLabel][$fieldId] ?? null;
+                            
+                            // Normalize values for comparison
+                            $orgtrakkerNormalized = $this->normalizeValueForComparison($orgtrakkerValue);
+                            $scorecardtrakkerNormalized = $this->normalizeValueForComparison($scorecardtrakkerValue);
+                            
+                            // Compare values
+                            if ($orgtrakkerNormalized !== $scorecardtrakkerNormalized) {
+                                $differences[] = [
+                                    'location' => 'subgroup',
+                                    'subGroupLabel' => $subGroupLabel,
+                                    'fieldId' => $fieldId,
+                                    'label' => $label,
+                                    'orgtrakker_value' => $orgtrakkerValue,
+                                    'orgtrakker_normalized' => $orgtrakkerNormalized,
+                                    'scorecardtrakker_value' => $scorecardtrakkerValue,
+                                    'scorecardtrakker_normalized' => $scorecardtrakkerNormalized,
+                                ];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        return !empty($differences); // Return true if differences found
+    }
+    
+    /**
+     * Normalize value for comparison (trim, handle null/empty, type conversion)
+     *
+     * @param mixed $value
+     * @return string
+     */
+    private function normalizeValueForComparison($value)
+    {
+        if ($value === null) {
+            return '';
+        }
+        
+        if (is_bool($value)) {
+            return $value ? '1' : '0';
+        }
+        
+        if (is_numeric($value)) {
+            return (string)$value;
+        }
+        
+        if (is_string($value)) {
+            return trim($value);
+        }
+        
+        if (is_array($value)) {
+            return json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        }
+        
+        return (string)$value;
+    }
+
+    /**
+     * Extract field value from answers JSON by searching for field label
+     *
+     * @param array $answers
+     * @param array $templateStructure
+     * @param string $fieldLabel
+     * @return string|null
+     */
+    private function extractFieldValueFromAnswers($answers, $templateStructure, $fieldLabel)
+    {
+        if (empty($answers) || empty($templateStructure)) {
+            return null;
+        }
+        
+        // Search through groups and subGroups
+        foreach ($templateStructure as $group) {
+            // Check fields in group
+            if (isset($group['fields']) && is_array($group['fields'])) {
+                foreach ($group['fields'] as $field) {
+                    $label = $field['label'] ?? '';
+                    $fieldId = $field['id'] ?? null;
+                    
+                    // Match by label ONLY (case-insensitive)
+                    // NEVER use customize_field_label for mapping - it's a custom name that can be anything
+                    if (!empty($label) && strcasecmp($label, $fieldLabel) === 0) {
+                        // Found matching field, get value from answers
+                        $groupId = $group['id'] ?? null;
+                        if ($groupId && isset($answers[$groupId][$fieldId])) {
+                            return $answers[$groupId][$fieldId];
+                        }
+                    }
+                }
+            }
+            
+            // Check subGroups
+            if (isset($group['subGroups']) && is_array($group['subGroups'])) {
+                foreach ($group['subGroups'] as $subGroup) {
+                    if (isset($subGroup['fields']) && is_array($subGroup['fields'])) {
+                        foreach ($subGroup['fields'] as $field) {
+                            $label = $field['label'] ?? '';
+                            $fieldId = $field['id'] ?? null;
+                            
+                            // Match by label ONLY (case-insensitive)
+                            // NEVER use customize_field_label for mapping - it's a custom name that can be anything
+                            if (!empty($label) && strcasecmp($label, $fieldLabel) === 0) {
+                                // Found matching field in subGroup
+                                $subGroupId = $subGroup['id'] ?? null;
+                                if ($subGroupId && isset($answers[$subGroupId][$fieldId])) {
+                                    return $answers[$subGroupId][$fieldId];
+                                }
+                                // Also check for pattern {groupLabel}_{index}
+                                $groupLabel = $group['label'] ?? $group['id'];
+                                for ($i = 0; $i < 10; $i++) {
+                                    $subGroupLabel = "{$groupLabel}_{$i}";
+                                    if (isset($answers[$subGroupLabel][$fieldId])) {
+                                        return $answers[$subGroupLabel][$fieldId];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        return null;
+    }
+
+    /**
+     * Import all role levels from orgtrakker
+     *
+     * @param string $companyId
+     * @return int Count of imported role levels
+     */
+    private function importAllRoleLevelsFromOrgtrakker($companyId)
+    {
+        $orgtrakkerCompanyId = $this->getOrgtrakkerCompanyId($companyId);
+        $connection = $this->getOrgtrakkerConnection($companyId);
+        $importedCount = 0;
+        
+        // Fetch ALL role levels from orgtrakker
+        $stmt = $connection->execute(
+            'SELECT level_unique_id, name, rank, custom_fields, template_id
+             FROM role_levels 
+             WHERE company_id = :company_id AND deleted = false',
+            ['company_id' => $orgtrakkerCompanyId]
+        );
+        $orgtrakkerRoleLevels = $stmt->fetchAll('assoc');
+        
+        if (empty($orgtrakkerRoleLevels)) {
+            return 0;
+        }
+        
+        // Get templates
+        $scorecardtrakkerTemplate = $this->getDefaultRoleLevelTemplate($companyId);
+        $scorecardtrakkerTemplateStructure = is_string($scorecardtrakkerTemplate->structure) 
+            ? json_decode($scorecardtrakkerTemplate->structure, true) 
+            : $scorecardtrakkerTemplate->structure;
+        
+        // Get orgtrakker template
+        $orgtrakkerTemplateStmt = $connection->execute(
+            'SELECT structure FROM level_templates WHERE company_id = :company_id AND deleted = false LIMIT 1',
+            ['company_id' => $orgtrakkerCompanyId]
+        );
+        $orgtrakkerTemplate = $orgtrakkerTemplateStmt->fetch('assoc');
+        $orgtrakkerTemplateStructure = $orgtrakkerTemplate ? json_decode($orgtrakkerTemplate['structure'], true) : [];
+        
+        $RoleLevelsTable = $this->getTable('RoleLevels', $companyId);
+        $updatedCount = 0;
+        
+        foreach ($orgtrakkerRoleLevels as $roleLevel) {
+            $levelUniqueId = $roleLevel['level_unique_id'];
+            
+            // Check if already exists
+            $existing = $RoleLevelsTable->find()
+                ->where([
+                    'company_id' => $companyId,
+                    'level_unique_id' => $levelUniqueId,
+                    'deleted' => false,
+                ])
+                ->first();
+            
+            $isUpdate = $existing !== null;
+            
+            // Map custom_fields - always create structure based on scorecardtrakker template
+            $customFields = [];
+            if (!empty($roleLevel['custom_fields'])) {
+                $orgtrakkerCustomFields = json_decode($roleLevel['custom_fields'], true);
+                
+                Log::debug("🔍 ROLE LEVEL IMPORT DEBUG - Level: {$levelUniqueId}", [
+                    'orgtrakker_custom_fields' => $orgtrakkerCustomFields,
+                    'orgtrakker_rank_column' => $roleLevel['rank'] ?? null,
+                    'orgtrakker_template_structure_exists' => !empty($orgtrakkerTemplateStructure),
+                    'scorecardtrakker_template_structure_exists' => !empty($scorecardtrakkerTemplateStructure),
+                ]);
+                
+                if (is_array($orgtrakkerCustomFields) && !empty($orgtrakkerTemplateStructure) && !empty($scorecardtrakkerTemplateStructure)) {
+                    // Map fields from orgtrakker to scorecardtrakker structure
+                    // Treat rank/order like any other field - no special handling
+                    $customFields = $this->mapFieldValuesByLabel($orgtrakkerCustomFields, $orgtrakkerTemplateStructure, $scorecardtrakkerTemplateStructure, $levelUniqueId);
+                    
+                    Log::debug("🔍 ROLE LEVEL IMPORT DEBUG - After mapping", [
+                        'level_unique_id' => $levelUniqueId,
+                        'mapped_custom_fields' => $customFields,
+                    ]);
+                } elseif (!empty($scorecardtrakkerTemplateStructure)) {
+                    // If orgtrakker has no structure or mapping fails, create empty structure based on scorecardtrakker template
+                    $customFields = $this->mapFieldValuesByLabel([], [], $scorecardtrakkerTemplateStructure, $levelUniqueId);
+                } else {
+                    // Fallback: use orgtrakker custom_fields as-is if no scorecardtrakker structure
+                    $customFields = $orgtrakkerCustomFields ?? [];
+                }
+            } elseif (!empty($scorecardtrakkerTemplateStructure)) {
+                // If orgtrakker has no custom_fields, create empty structure based on scorecardtrakker template
+                $customFields = $this->mapFieldValuesByLabel([], [], $scorecardtrakkerTemplateStructure, $levelUniqueId);
+            }
+            
+            // Create or update role level
+            if ($isUpdate) {
+                // Update existing role level
+                $existing->name = $roleLevel['name'];
+                $existing->rank = $roleLevel['rank'];
+                $existing->custom_fields = $customFields;
+                $existing->modified = date('Y-m-d H:i:s');
+                if ($RoleLevelsTable->save($existing)) {
+                    $updatedCount++;
+                }
+            } else {
+                // Import new role level
+                $entity = $RoleLevelsTable->newEntity([
+                    'company_id' => $companyId,
+                    'level_unique_id' => $levelUniqueId,
+                    'name' => $roleLevel['name'],
+                    'rank' => $roleLevel['rank'],
+                    'custom_fields' => $customFields,
+                    'template_id' => $scorecardtrakkerTemplate->id,
+                    'created_by' => $this->Authentication->getIdentity()->get('username') ?? 'system',
+                    'created' => date('Y-m-d H:i:s'),
+                    'modified' => date('Y-m-d H:i:s'),
+                    'deleted' => false,
+                ]);
+                
+                if ($RoleLevelsTable->save($entity)) {
+                    $importedCount++;
+                }
+            }
+        }
+        
+        return ['imported' => $importedCount, 'updated' => $updatedCount];
+    }
+
+    /**
+     * Import all job roles from orgtrakker
+     *
+     * @param string $companyId
+     * @return int Count of imported job roles
+     */
+    private function importAllJobRolesFromOrgtrakker($companyId)
+    {
+        $orgtrakkerCompanyId = $this->getOrgtrakkerCompanyId($companyId);
+        $connection = $this->getOrgtrakkerConnection($companyId);
+        $importedCount = 0;
+        
+        // Fetch ALL job roles from orgtrakker
+        $stmt = $connection->execute(
+            'SELECT job_role_unique_id, answers, template_id
+             FROM job_role_template_answers 
+             WHERE company_id = :company_id AND deleted = false',
+            ['company_id' => $orgtrakkerCompanyId]
+        );
+        $orgtrakkerJobRoles = $stmt->fetchAll('assoc');
+        
+        if (empty($orgtrakkerJobRoles)) {
+            return 0;
+        }
+        
+        // Get templates
+        $scorecardtrakkerTemplate = $this->getDefaultJobRoleTemplate($companyId);
+        $scorecardtrakkerTemplateStructure = is_string($scorecardtrakkerTemplate->structure) 
+            ? json_decode($scorecardtrakkerTemplate->structure, true) 
+            : $scorecardtrakkerTemplate->structure;
+        
+        // Get orgtrakker template
+        $orgtrakkerTemplateStmt = $connection->execute(
+            'SELECT structure FROM job_role_templates WHERE company_id = :company_id AND deleted = false LIMIT 1',
+            ['company_id' => $orgtrakkerCompanyId]
+        );
+        $orgtrakkerTemplate = $orgtrakkerTemplateStmt->fetch('assoc');
+        $orgtrakkerTemplateStructure = $orgtrakkerTemplate ? json_decode($orgtrakkerTemplate['structure'], true) : [];
+        
+        $JobRoleTemplateAnswersTable = $this->getTable('JobRoleTemplateAnswers', $companyId);
+        $updatedCount = 0;
+        
+        foreach ($orgtrakkerJobRoles as $jobRole) {
+            $jobRoleUniqueId = $jobRole['job_role_unique_id'];
+            
+            // Check if already exists
+            $existing = $JobRoleTemplateAnswersTable->find()
+                ->where([
+                    'company_id' => $companyId,
+                    'job_role_unique_id' => $jobRoleUniqueId,
+                    'deleted' => false,
+                ])
+                ->first();
+            
+            // Map answers
+            $orgtrakkerAnswers = json_decode($jobRole['answers'], true);
+            $mappedAnswers = $this->mapFieldValuesByLabel($orgtrakkerAnswers, $orgtrakkerTemplateStructure, $scorecardtrakkerTemplateStructure);
+            
+            if ($existing) {
+                // Update existing job role
+                $existing->answers = $mappedAnswers;
+                $existing->modified = date('Y-m-d H:i:s');
+                if ($JobRoleTemplateAnswersTable->save($existing)) {
+                    $updatedCount++;
+                }
+            } else {
+                // Import new job role
+                $entity = $JobRoleTemplateAnswersTable->newEntity([
+                    'company_id' => $companyId,
+                    'job_role_unique_id' => $jobRoleUniqueId,
+                    'template_id' => $scorecardtrakkerTemplate->id,
+                    'answers' => $mappedAnswers,
+                    'created' => date('Y-m-d H:i:s'),
+                    'modified' => date('Y-m-d H:i:s'),
+                    'deleted' => false,
+                ]);
+                
+                if ($JobRoleTemplateAnswersTable->save($entity)) {
+                    $importedCount++;
+                }
+            }
+        }
+        
+        return ['imported' => $importedCount, 'updated' => $updatedCount];
+    }
+
+    /**
+     * Import all job role reporting relationships from orgtrakker
+     *
+     * @param string $companyId
+     * @return int Count of imported relationships
+     */
+    private function importAllJobRoleReportingRelationships($companyId)
+    {
+        $orgtrakkerCompanyId = $this->getOrgtrakkerCompanyId($companyId);
+        $connection = $this->getOrgtrakkerConnection($companyId);
+        $importedCount = 0;
+        
+        // Fetch ALL job role reporting relationships from orgtrakker
+        $stmt = $connection->execute(
+            'SELECT job_role, reporting_to
+             FROM job_role_reporting_relationships 
+             WHERE company_id = :company_id AND deleted = false',
+            ['company_id' => $orgtrakkerCompanyId]
+        );
+        $orgtrakkerRelationships = $stmt->fetchAll('assoc');
+        
+        if (empty($orgtrakkerRelationships)) {
+            return 0;
+        }
+        
+        // Get existing job roles in scorecardtrakker
+        $JobRoleTemplateAnswersTable = $this->getTable('JobRoleTemplateAnswers', $companyId);
+        $existingJobRoles = $JobRoleTemplateAnswersTable->find()
+            ->select(['job_role_unique_id'])
+            ->where([
+                'company_id' => $companyId,
+                'deleted' => false,
+            ])
+            ->toArray();
+        
+        $existingJobRoleIds = [];
+        foreach ($existingJobRoles as $jr) {
+            $existingJobRoleIds[$jr->job_role_unique_id] = true;
+        }
+        
+        // Get existing relationships
+        $JobRoleReportingRelationshipsTable = $this->getTable('JobRoleReportingRelationships', $companyId);
+        $existingRelationships = $JobRoleReportingRelationshipsTable->find()
+            ->select(['id', 'job_role', 'reporting_to'])
+            ->where([
+                'company_id' => $companyId,
+                'deleted' => false,
+            ])
+            ->toArray();
+        
+        // Create map by job_role for quick lookup
+        $existingRelationshipsMap = [];
+        foreach ($existingRelationships as $rel) {
+            $existingRelationshipsMap[$rel->job_role] = $rel;
+        }
+        
+        $updatedCount = 0;
+        foreach ($orgtrakkerRelationships as $relationship) {
+            $jobRole = $relationship['job_role'];
+            $reportingTo = $relationship['reporting_to'];
+            
+            // Check if both job roles exist
+            if (!isset($existingJobRoleIds[$jobRole]) || !isset($existingJobRoleIds[$reportingTo])) {
+                continue; // Skip if job roles don't exist
+            }
+            
+            // Check if relationship already exists
+            $existingRelationship = $existingRelationshipsMap[$jobRole] ?? null;
+            
+            if ($existingRelationship) {
+                // Update if reporting_to changed
+                if ($existingRelationship->reporting_to !== $reportingTo) {
+                    $existingRelationship->reporting_to = $reportingTo;
+                    $existingRelationship->modified = date('Y-m-d H:i:s');
+                    if ($JobRoleReportingRelationshipsTable->save($existingRelationship)) {
+                        $updatedCount++;
+                    }
+                }
+            } else {
+                // Import new relationship
+                $entity = $JobRoleReportingRelationshipsTable->newEntity([
+                    'company_id' => $companyId,
+                    'job_role' => $jobRole,
+                    'reporting_to' => $reportingTo,
+                    'created' => date('Y-m-d H:i:s'),
+                    'modified' => date('Y-m-d H:i:s'),
+                    'deleted' => false,
+                ]);
+                
+                if ($JobRoleReportingRelationshipsTable->save($entity)) {
+                    $importedCount++;
+                    $existingRelationshipsMap[$jobRole] = $entity; // Track newly imported
+                }
+            }
+        }
+        
+        return ['imported' => $importedCount, 'updated' => $updatedCount];
+    }
+
+    /**
+     * Import all employees from orgtrakker
+     *
+     * @param string $companyId
+     * @return int Count of imported employees
+     */
+    private function importAllEmployeesFromOrgtrakker($companyId)
+    {
+        $orgtrakkerCompanyId = $this->getOrgtrakkerCompanyId($companyId);
+        $connection = $this->getOrgtrakkerConnection($companyId);
+        $importedCount = 0;
+        
+        // Fetch ALL employees from orgtrakker
+        $stmt = $connection->execute(
+            'SELECT company_id, employee_unique_id, employee_id, username, answers, template_id
+             FROM employee_template_answers 
+             WHERE company_id = :company_id AND deleted = false',
+            ['company_id' => $orgtrakkerCompanyId]
+        );
+        $orgtrakkerEmployees = $stmt->fetchAll('assoc');
+        
+        if (empty($orgtrakkerEmployees)) {
+            return 0;
+        }
+        
+        // Get templates
+        $scorecardtrakkerTemplate = $this->getDefaultEmployeeTemplate($companyId);
+        $scorecardtrakkerTemplateStructure = is_string($scorecardtrakkerTemplate->structure) 
+            ? json_decode($scorecardtrakkerTemplate->structure, true) 
+            : $scorecardtrakkerTemplate->structure;
+        
+        // Get orgtrakker template
+        $orgtrakkerTemplateStmt = $connection->execute(
+            'SELECT structure FROM employee_templates WHERE company_id = :company_id AND name = :name AND deleted = false LIMIT 1',
+            ['company_id' => $orgtrakkerCompanyId, 'name' => 'employee']
+        );
+        $orgtrakkerTemplate = $orgtrakkerTemplateStmt->fetch('assoc');
+        $orgtrakkerTemplateStructure = $orgtrakkerTemplate ? json_decode($orgtrakkerTemplate['structure'], true) : [];
+        
+        // Get existing employees with full data for updates
+        $EmployeeTemplateAnswersTable = $this->getTable('EmployeeTemplateAnswers', $companyId);
+        $existingEmployees = $EmployeeTemplateAnswersTable->find()
+            ->select(['id', 'username', 'employee_unique_id', 'answers'])
+            ->where([
+                'company_id' => $companyId,
+                'deleted' => false,
+            ])
+            ->toArray();
+        
+        $existingEmployeesMap = [];
+        foreach ($existingEmployees as $emp) {
+            $key = $emp->employee_unique_id ?? $emp->username ?? '';
+            if (!empty($key)) {
+                $existingEmployeesMap[$key] = $emp;
+            }
+        }
+        
+        // Get existing job roles
+        $JobRoleTemplateAnswersTable = $this->getTable('JobRoleTemplateAnswers', $companyId);
+        $existingJobRoles = $JobRoleTemplateAnswersTable->find()
+            ->select(['job_role_unique_id'])
+            ->where([
+                'company_id' => $companyId,
+                'deleted' => false,
+            ])
+            ->toArray();
+        
+        $existingJobRoleIds = [];
+        foreach ($existingJobRoles as $jr) {
+            $existingJobRoleIds[$jr->job_role_unique_id] = true;
+        }
+        
+        $currentUser = $this->Authentication->getIdentity();
+        $createdBy = $currentUser ? ($currentUser->get('username') ?? 'system') : 'system';
+        $updatedCount = 0;
+        
+        foreach ($orgtrakkerEmployees as $employee) {
+            $username = $employee['username'] ?? '';
+            $employeeUniqueId = $employee['employee_unique_id'] ?? '';
+            
+            // Check if already exists
+            $existingEmployee = $existingEmployeesMap[$employeeUniqueId] ?? $existingEmployeesMap[$username] ?? null;
+            $isUpdate = $existingEmployee !== null;
+            
+            // Map answers
+            $orgtrakkerAnswers = json_decode($employee['answers'], true);
+            
+            // Extract report_to_employee_unique_id FIRST, before mapping
+            // This ensures we have the value even if mapping fails
+            $reportToEmployeeUniqueId = $this->extractFieldValueFromAnswers($orgtrakkerAnswers, $orgtrakkerTemplateStructure, 'Reports To');
+            error_log("🔍 EMPLOYEE IMPORT - Pre-mapping extraction - Employee: {$employeeUniqueId}, Reports To value: " . ($reportToEmployeeUniqueId !== null ? (string)$reportToEmployeeUniqueId : 'NULL'));
+            
+            // Pass employee unique ID as debug identifier to track Reports To field mapping
+            $mappedAnswers = $this->mapFieldValuesByLabel($orgtrakkerAnswers, $orgtrakkerTemplateStructure, $scorecardtrakkerTemplateStructure, $employeeUniqueId);
+            
+            // Extract job_role_unique_id from orgtrakker answers
+            // report_to_employee_unique_id was already extracted above
+            $jobRoleUniqueId = $this->extractFieldValueFromAnswers($orgtrakkerAnswers, $orgtrakkerTemplateStructure, 'Job Role');
+            
+            // If job_role_unique_id doesn't exist in scorecardtrakker, set to empty in mapped answers
+            if ($jobRoleUniqueId && !isset($existingJobRoleIds[$jobRoleUniqueId])) {
+                // Find the field in scorecardtrakker template and set to empty
+                foreach ($scorecardtrakkerTemplateStructure as $group) {
+                    foreach ($group['fields'] ?? [] as $field) {
+                        // Use 'label' ONLY (not 'customize_field_label') for mapping
+                        $fieldLabel = $field['label'] ?? '';
+                        if (!empty($fieldLabel) && strcasecmp($fieldLabel, 'Job Role') === 0) {
+                            $groupId = $group['id'];
+                            $fieldId = $field['id'];
+                            if (isset($mappedAnswers[$groupId][$fieldId])) {
+                                $mappedAnswers[$groupId][$fieldId] = '';
+                            }
+                            break 2;
+                        }
+                    }
+                }
+                $jobRoleUniqueId = null;
+            }
+            
+            // Verify and ensure "Reports To" field value is in mapped answers
+            // This is a safety check in case the mapping didn't work for some reason
+            error_log("🔍 REPORTS TO VERIFICATION - Employee: {$employeeUniqueId}, Extracted value: " . ($reportToEmployeeUniqueId !== null ? (string)$reportToEmployeeUniqueId : 'NULL'));
+            if ($reportToEmployeeUniqueId !== null && $reportToEmployeeUniqueId !== '') {
+                $reportsToFoundInMappedAnswers = false;
+                foreach ($scorecardtrakkerTemplateStructure as $group) {
+                    // Check regular fields
+                    foreach ($group['fields'] ?? [] as $field) {
+                        $fieldLabel = $field['label'] ?? '';
+                        if (!empty($fieldLabel) && strcasecmp($fieldLabel, 'Reports To') === 0) {
+                            $groupId = $group['id'];
+                            $fieldId = $field['id'];
+                            $currentValue = $mappedAnswers[$groupId][$fieldId] ?? null;
+                            
+                            error_log("🔍 REPORTS TO VERIFICATION - Found field in group {$groupId}, field {$fieldId}, current value: " . ($currentValue !== null ? (string)$currentValue : 'NULL'));
+                            
+                            // ALWAYS set the value if we have an extracted value, even if current value exists
+                            // This ensures the Reports To field is always populated from orgtrakker
+                            if (!isset($mappedAnswers[$groupId])) {
+                                $mappedAnswers[$groupId] = [];
+                            }
+                            $mappedAnswers[$groupId][$fieldId] = $reportToEmployeeUniqueId;
+                            Log::debug("🔍 EMPLOYEE IMPORT - Reports To value explicitly set in mapped answers", [
+                                'employee_unique_id' => $employeeUniqueId,
+                                'group_id' => $groupId,
+                                'field_id' => $fieldId,
+                                'value' => $reportToEmployeeUniqueId,
+                                'previous_value' => $currentValue,
+                            ]);
+                            error_log("🔍 REPORTS TO VERIFICATION - SET VALUE in group {$groupId}, field {$fieldId} to: {$reportToEmployeeUniqueId} (previous: " . ($currentValue !== null ? (string)$currentValue : 'NULL') . ")");
+                            $reportsToFoundInMappedAnswers = true;
+                            break 2;
+                        }
+                    }
+                    
+                    // Check subgroups
+                    if (!$reportsToFoundInMappedAnswers && isset($group['subGroups']) && is_array($group['subGroups'])) {
+                        $groupLabel = $group['label'] ?? $group['id'];
+                        foreach ($group['subGroups'] as $index => $subGroup) {
+                            foreach ($subGroup['fields'] ?? [] as $field) {
+                                $fieldLabel = $field['label'] ?? '';
+                                if (!empty($fieldLabel) && strcasecmp($fieldLabel, 'Reports To') === 0) {
+                                    $subGroupLabel = "{$groupLabel}_{$index}";
+                                    $fieldId = $field['id'];
+                                    $currentValue = $mappedAnswers[$subGroupLabel][$fieldId] ?? null;
+                                    
+                                    error_log("🔍 REPORTS TO VERIFICATION - Found field in subgroup {$subGroupLabel}, field {$fieldId}, current value: " . ($currentValue !== null ? (string)$currentValue : 'NULL'));
+                                    
+                                    // ALWAYS set the value if we have an extracted value, even if current value exists
+                                    if (!isset($mappedAnswers[$subGroupLabel])) {
+                                        $mappedAnswers[$subGroupLabel] = [];
+                                    }
+                                    $mappedAnswers[$subGroupLabel][$fieldId] = $reportToEmployeeUniqueId;
+                                    Log::debug("🔍 EMPLOYEE IMPORT - Reports To value explicitly set in mapped answers (subgroup)", [
+                                        'employee_unique_id' => $employeeUniqueId,
+                                        'subgroup_label' => $subGroupLabel,
+                                        'field_id' => $fieldId,
+                                        'value' => $reportToEmployeeUniqueId,
+                                        'previous_value' => $currentValue,
+                                    ]);
+                                    error_log("🔍 REPORTS TO VERIFICATION - SET VALUE in subgroup {$subGroupLabel}, field {$fieldId} to: {$reportToEmployeeUniqueId} (previous: " . ($currentValue !== null ? (string)$currentValue : 'NULL') . ")");
+                                    $reportsToFoundInMappedAnswers = true;
+                                    break 3;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                if (!$reportsToFoundInMappedAnswers) {
+                    error_log("🔍 REPORTS TO VERIFICATION - WARNING: Reports To field not found in scorecardtrakker template structure!");
+                }
+            } else {
+                error_log("🔍 REPORTS TO VERIFICATION - Extracted value is null or empty, skipping verification");
+            }
+            
+            // Log mapped answers before saving
+            error_log("🔍 EMPLOYEE IMPORT - Before save - Employee: {$employeeUniqueId}, Mapped answers: " . json_encode($mappedAnswers));
+            
+            // Check if Reports To is in mapped answers
+            $reportsToInMappedAnswers = false;
+            $reportsToValue = null;
+            foreach ($mappedAnswers as $groupId => $groupData) {
+                if (is_array($groupData)) {
+                    foreach ($groupData as $fieldId => $fieldValue) {
+                        // We need to check if this field ID corresponds to Reports To
+                        // For now, just log all field values
+                        if ($fieldId && is_string($fieldValue) && strlen($fieldValue) > 0) {
+                            error_log("🔍 EMPLOYEE IMPORT - Field in mapped answers - Group: {$groupId}, Field: {$fieldId}, Value: {$fieldValue}");
+                        }
+                    }
+                }
+            }
+            
+            // Create or update employee
+            if ($isUpdate) {
+                // Update existing employee
+                $entity = $EmployeeTemplateAnswersTable->get($existingEmployee->id);
+                $entity->answers = $mappedAnswers;
+                $entity->report_to_employee_unique_id = $reportToEmployeeUniqueId ?: null;
+                $entity->modified = date('Y-m-d H:i:s');
+                
+                if ($EmployeeTemplateAnswersTable->save($entity)) {
+                    $updatedCount++;
+                }
+            } else {
+                // Create new employee
+                $entity = $EmployeeTemplateAnswersTable->newEntity([
+                    'company_id' => $companyId,
+                    'employee_unique_id' => $employeeUniqueId,
+                    'employee_id' => $employee['employee_id'] ?? '',
+                    'username' => $username,
+                    'template_id' => $scorecardtrakkerTemplate->id,
+                    'answers' => $mappedAnswers,
+                    'report_to_employee_unique_id' => $reportToEmployeeUniqueId ?: null,
+                    'created_by' => $createdBy,
+                    'created' => date('Y-m-d H:i:s'),
+                    'modified' => date('Y-m-d H:i:s'),
+                    'deleted' => false,
+                ]);
+                
+                if ($EmployeeTemplateAnswersTable->save($entity)) {
+                    $importedCount++;
+                }
+            }
+        }
+        
+        // Create user company mappings for all imported/updated employees
+        try {
+            $mappingService = $this->getCompanyMappingService();
+            $orgtrakkerCompanyId = $this->getOrgtrakkerCompanyId($companyId);
+            
+            // Get all employees that were just imported/updated
+            $importedEmployees = $EmployeeTemplateAnswersTable->find()
+                ->select(['username', 'employee_unique_id'])
+                ->where([
+                    'company_id' => $companyId,
+                    'deleted' => false
+                ])
+                ->toArray();
+            
+            $mappingsCreated = 0;
+            $mappingsSkipped = 0;
+            $usersNotFound = 0;
+            
+            // Get Users table from workmatica database (default connection)
+            $UsersTable = $this->getTable('Users');
+            
+            foreach ($importedEmployees as $employee) {
+                $username = $employee->username ?? '';
+                if (empty($username)) {
+                    continue;
+                }
+                
+                // Get user from workmatica Users table (users are stored centrally)
+                try {
+                    $orgtrakkerUser = $UsersTable->find()
+                        ->where([
+                            'username' => $username,
+                            'company_id' => $orgtrakkerCompanyId,
+                            'deleted' => false
+                        ])
+                        ->first();
+                    
+                    if ($orgtrakkerUser) {
+                        $userId = (int)$orgtrakkerUser->id;
+                        $sourceCompanyId = (int)$orgtrakkerUser->company_id;
+                        
+                        // Create user company mapping
+                        if ($mappingService->createUserCompanyMapping(
+                            $userId,
+                            $username,
+                            $sourceCompanyId,
+                            (int)$companyId,
+                            'scorecardtrakker'
+                        )) {
+                            $mappingsCreated++;
+                            Log::debug('User company mapping created', [
+                                'user_id' => $userId,
+                                'username' => $username,
+                                'source_company_id' => $sourceCompanyId,
+                                'mapped_company_id' => $companyId
+                            ]);
+                        } else {
+                            $mappingsSkipped++;
+                            Log::warning('Failed to create user company mapping', [
+                                'user_id' => $userId,
+                                'username' => $username,
+                                'source_company_id' => $sourceCompanyId,
+                                'mapped_company_id' => $companyId
+                            ]);
+                        }
+                    } else {
+                        $usersNotFound++;
+                        Log::debug('User not found in workmatica database for mapping creation', [
+                            'username' => $username,
+                            'orgtrakker_company_id' => $orgtrakkerCompanyId
+                        ]);
+                    }
+                } catch (\Exception $e) {
+                    Log::error('Error creating user company mapping during import: ' . $e->getMessage(), [
+                        'username' => $username,
+                        'company_id' => $companyId,
+                        'orgtrakker_company_id' => $orgtrakkerCompanyId,
+                        'trace' => $e->getTraceAsString()
+                    ]);
+                    // Continue with next employee even if mapping fails
+                }
+            }
+            
+            Log::info('User company mappings created during employee import', [
+                'company_id' => $companyId,
+                'mappings_created' => $mappingsCreated,
+                'mappings_skipped' => $mappingsSkipped,
+                'users_not_found' => $usersNotFound,
+                'total_employees' => count($importedEmployees)
+            ]);
+        } catch (\Exception $e) {
+            // Log error but don't fail the import
+            Log::error('Error creating user company mappings during employee import: ' . $e->getMessage(), [
+                'company_id' => $companyId,
+                'trace' => $e->getTraceAsString()
+            ]);
+        }
+        
+        return ['imported' => $importedCount, 'updated' => $updatedCount];
+    }
+
+    /**
+     * Import all employee reporting relationships from orgtrakker
+     *
+     * @param string $companyId
+     * @return int Count of imported relationships
+     */
+    private function importAllEmployeeReportingRelationships($companyId)
+    {
+        $orgtrakkerCompanyId = $this->getOrgtrakkerCompanyId($companyId);
+        $connection = $this->getOrgtrakkerConnection($companyId);
+        $importedCount = 0;
+        
+        // Fetch ALL employee reporting relationships from orgtrakker
+        $stmt = $connection->execute(
+            'SELECT employee_unique_id, report_to_employee_unique_id, employee_first_name, employee_last_name, 
+                    reporting_manager_first_name, reporting_manager_last_name, start_date, end_date, created_by
+             FROM employee_reporting_relationships 
+             WHERE company_id = :company_id AND deleted = false',
+            ['company_id' => $orgtrakkerCompanyId]
+        );
+        $orgtrakkerRelationships = $stmt->fetchAll('assoc');
+        
+        if (empty($orgtrakkerRelationships)) {
+            return 0;
+        }
+        
+        // Get existing employees in scorecardtrakker
+        $EmployeeTemplateAnswersTable = $this->getTable('EmployeeTemplateAnswers', $companyId);
+        $existingEmployees = $EmployeeTemplateAnswersTable->find()
+            ->select(['employee_unique_id'])
+            ->where([
+                'company_id' => $companyId,
+                'deleted' => false,
+            ])
+            ->toArray();
+        
+        $existingEmployeeIds = [];
+        foreach ($existingEmployees as $emp) {
+            $existingEmployeeIds[$emp->employee_unique_id] = true;
+        }
+        
+        // Get existing relationships
+        $EmployeeReportingRelationshipsTable = $this->getTable('EmployeeReportingRelationships', $companyId);
+        $existingRelationships = $EmployeeReportingRelationshipsTable->find()
+            ->select(['id', 'employee_unique_id', 'report_to_employee_unique_id'])
+            ->where([
+                'company_id' => $companyId,
+                'deleted' => false,
+            ])
+            ->toArray();
+        
+        // Create map by employee_unique_id for quick lookup
+        $existingRelationshipsMap = [];
+        foreach ($existingRelationships as $rel) {
+            $existingRelationshipsMap[$rel->employee_unique_id] = $rel;
+        }
+        
+        $currentUser = $this->Authentication->getIdentity();
+        $createdBy = $currentUser ? ($currentUser->get('username') ?? 'system') : 'system';
+        $updatedCount = 0;
+        
+        foreach ($orgtrakkerRelationships as $relationship) {
+            $employeeUniqueId = $relationship['employee_unique_id'];
+            $reportToEmployeeUniqueId = $relationship['report_to_employee_unique_id'];
+            
+            // Check if both employees exist
+            if (!isset($existingEmployeeIds[$employeeUniqueId]) || 
+                ($reportToEmployeeUniqueId && !isset($existingEmployeeIds[$reportToEmployeeUniqueId]))) {
+                continue; // Skip if employees don't exist
+            }
+            
+            // Check if relationship already exists
+            $existingRelationship = $existingRelationshipsMap[$employeeUniqueId] ?? null;
+            
+            if ($existingRelationship) {
+                // Update if report_to_employee_unique_id changed
+                if ($existingRelationship->report_to_employee_unique_id !== $reportToEmployeeUniqueId) {
+                    $existingRelationship->report_to_employee_unique_id = $reportToEmployeeUniqueId ?: null;
+                    $existingRelationship->employee_first_name = $relationship['employee_first_name'] ?? '';
+                    $existingRelationship->employee_last_name = $relationship['employee_last_name'] ?? '';
+                    $existingRelationship->reporting_manager_first_name = $relationship['reporting_manager_first_name'] ?? null;
+                    $existingRelationship->reporting_manager_last_name = $relationship['reporting_manager_last_name'] ?? null;
+                    $existingRelationship->start_date = $relationship['start_date'] ?? null;
+                    $existingRelationship->end_date = $relationship['end_date'] ?? null;
+                    $existingRelationship->modified = date('Y-m-d H:i:s');
+                    if ($EmployeeReportingRelationshipsTable->save($existingRelationship)) {
+                        $updatedCount++;
+                        
+                        // Also update report_to_employee_unique_id in employee_template_answers
+                        $employee = $EmployeeTemplateAnswersTable->find()
+                            ->where([
+                                'company_id' => $companyId,
+                                'employee_unique_id' => $employeeUniqueId,
+                                'deleted' => false,
+                            ])
+                            ->first();
+                        
+                        if ($employee) {
+                            $employee->report_to_employee_unique_id = $reportToEmployeeUniqueId ?: null;
+                            $employee->modified = date('Y-m-d H:i:s');
+                            $EmployeeTemplateAnswersTable->save($employee);
+                        }
+                    }
+                }
+            } else {
+                // Import new relationship
+                $entity = $EmployeeReportingRelationshipsTable->newEntity([
+                    'company_id' => $companyId,
+                    'employee_unique_id' => $employeeUniqueId,
+                    'report_to_employee_unique_id' => $reportToEmployeeUniqueId ?: null,
+                    'employee_first_name' => $relationship['employee_first_name'] ?? '',
+                    'employee_last_name' => $relationship['employee_last_name'] ?? '',
+                    'reporting_manager_first_name' => $relationship['reporting_manager_first_name'] ?? null,
+                    'reporting_manager_last_name' => $relationship['reporting_manager_last_name'] ?? null,
+                    'start_date' => $relationship['start_date'] ?? null,
+                    'end_date' => $relationship['end_date'] ?? null,
+                    'created_by' => $createdBy,
+                    'created' => date('Y-m-d H:i:s'),
+                    'modified' => date('Y-m-d H:i:s'),
+                    'deleted' => false,
+                ]);
+                
+                if ($EmployeeReportingRelationshipsTable->save($entity)) {
+                    $importedCount++;
+                    $existingRelationshipsMap[$employeeUniqueId] = $entity; // Track newly imported
+                    
+                    // Also update report_to_employee_unique_id in employee_template_answers
+                    $employee = $EmployeeTemplateAnswersTable->find()
+                        ->where([
+                            'company_id' => $companyId,
+                            'employee_unique_id' => $employeeUniqueId,
+                            'deleted' => false,
+                        ])
+                        ->first();
+                    
+                    if ($employee) {
+                        $employee->report_to_employee_unique_id = $reportToEmployeeUniqueId ?: null;
+                        $employee->modified = date('Y-m-d H:i:s');
+                        $EmployeeTemplateAnswersTable->save($employee);
+                    }
+                }
+            }
+        }
+        
+        return ['imported' => $importedCount, 'updated' => $updatedCount];
+    }
+
+    /**
+     * Import employees from orgtrakker
+     *
+     * @return \Cake\Http\Response
+     */
+    public function importOrgtrakkerEmployees()
+    {
+        $this->request->allowMethod(['post']);
+
+        // Authentication check
+        $authResult = $this->Authentication->getResult();
+        if (!$authResult || !$authResult->isValid()) {
+            return $this->response
+                ->withStatus(401)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Unauthorized access',
+                ]));
+        }
+
+        // Require admin access for importing employees
+        $adminCheck = $this->requireAdmin();
+        if ($adminCheck !== null) {
+            return $adminCheck;
+        }
+
+        $companyId = $this->getCompanyId($authResult);
+        $data = $this->request->getData();
+        $employeeUniqueIds = $data['employee_ids'] ?? [];
+
+        if (empty($employeeUniqueIds) || !is_array($employeeUniqueIds)) {
+            return $this->response
+                ->withStatus(400)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Employee IDs are required',
+                ]));
+        }
+
+        try {
+            // Get default employee template
+            $template = $this->getDefaultEmployeeTemplate($companyId);
+            $templateStructure = $template->structure;
+            $emptyAnswers = $this->generateEmptyAnswersFromTemplate($templateStructure);
+            
+            $EmployeeTemplateAnswersTable = $this->getTable('EmployeeTemplateAnswers', $companyId);
+            $connection = $EmployeeTemplateAnswersTable->getConnection();
+            
+            $importedCount = 0;
+            $failedEmployees = [];
+            $currentUser = $this->Authentication->getIdentity();
+            $createdBy = $currentUser ? ($currentUser->get('username') ?? 'system') : 'system';
+            
+            foreach ($employeeUniqueIds as $employeeUniqueId) {
+                try {
+                    // Fetch employee from orgtrakker
+                    $orgtrakkerEmployee = $this->getOrgtrakkerEmployee($employeeUniqueId, $companyId);
+                    
+                    if (!$orgtrakkerEmployee) {
+                        $failedEmployees[] = [
+                            'employee_unique_id' => $employeeUniqueId,
+                            'reason' => 'Employee not found in orgtrakker database',
+                        ];
+                        continue;
+                    }
+                    
+                    $username = $orgtrakkerEmployee['username'] ?? '';
+                    $employeeId = $orgtrakkerEmployee['employee_id'] ?? '';
+                    
+                    // Check if already imported
+                    if ($this->checkEmployeeAlreadyImported($companyId, $username, $employeeUniqueId)) {
+                        $failedEmployees[] = [
+                            'employee_unique_id' => $employeeUniqueId,
+                            'username' => $username,
+                            'reason' => 'Employee already imported',
+                        ];
+                        continue;
+                    }
+                    
+                    // Start transaction for this employee
+                    $connection->begin();
+                    
+                    try {
+                        // Create employee record
+                        $answerEntity = $EmployeeTemplateAnswersTable->newEntity([
+                            'company_id' => $companyId,
+                            'employee_unique_id' => $employeeUniqueId,
+                            'employee_id' => $employeeId,
+                            'username' => $username,
+                            'template_id' => $template->id,
+                            'answers' => $emptyAnswers,
+                            'report_to_employee_unique_id' => null,
+                            'created_by' => $createdBy,
+                            'created' => date('Y-m-d H:i:s'),
+                            'modified' => date('Y-m-d H:i:s'),
+                            'deleted' => false,
+                        ]);
+                        
+                        if (!$EmployeeTemplateAnswersTable->save($answerEntity)) {
+                            throw new Exception('Failed to save employee record');
+                        }
+                        
+                        $connection->commit();
+                        $importedCount++;
+                        
+                        // Log audit action
+                        AuditHelper::logEmployeeAction(
+                            'IMPORT',
+                            $employeeUniqueId,
+                            $username,
+                            AuditHelper::extractUserData($authResult),
+                            $this->request
+                        );
+                        
+                    } catch (\Exception $e) {
+                        $connection->rollback();
+                        throw $e;
+                    }
+                    
+                } catch (\Exception $e) {
+                    Log::error('Error importing employee: ' . $e->getMessage(), [
+                        'employee_unique_id' => $employeeUniqueId,
+                        'trace' => $e->getTraceAsString()
+                    ]);
+                    $failedEmployees[] = [
+                        'employee_unique_id' => $employeeUniqueId,
+                        'reason' => $e->getMessage(),
+                    ];
+                }
+            }
+            
+            $message = "Successfully imported {$importedCount} employee(s)";
+            if (!empty($failedEmployees)) {
+                $message .= ". " . count($failedEmployees) . " employee(s) failed to import.";
+            }
+            
+            return $this->response
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => true,
+                    'message' => $message,
+                    'imported_count' => $importedCount,
+                    'failed_count' => count($failedEmployees),
+                    'failed_employees' => $failedEmployees,
+                ]));
+                
+        } catch (\Exception $e) {
+            Log::error('Error importing orgtrakker employees: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString()
+            ]);
+            return $this->response
+                ->withStatus(500)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Error importing employees: ' . $e->getMessage(),
+                ]));
+        }
+    }
+
+    /**
+     * Import all employees and related data from orgtrakker
+     *
+     * @return \Cake\Http\Response
+     */
+    public function importAllOrgtrakkerEmployees()
+    {
+        $this->request->allowMethod(['post']);
+
+        // Authentication check
+        $authResult = $this->Authentication->getResult();
+        if (!$authResult || !$authResult->isValid()) {
+            return $this->response
+                ->withStatus(401)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Unauthorized access',
+                ]));
+        }
+
+        // Require admin access for importing all employees
+        $adminCheck = $this->requireAdmin();
+        if ($adminCheck !== null) {
+            return $adminCheck;
+        }
+
+        $companyId = $this->getCompanyId($authResult);
+
+        try {
+            // Get connection for transaction
+            $EmployeeTemplateAnswersTable = $this->getTable('EmployeeTemplateAnswers', $companyId);
+            $connection = $EmployeeTemplateAnswersTable->getConnection();
+            
+            // Drop unique constraint on rank if it exists (to allow duplicate ranks)
+            try {
+                $connection->execute('ALTER TABLE role_levels DROP CONSTRAINT IF EXISTS role_levels_rank_key');
+                Log::info('Dropped role_levels_rank_key constraint to allow duplicate ranks');
+            } catch (\Exception $e) {
+                // Constraint might not exist, that's okay
+                Log::debug('Could not drop role_levels_rank_key constraint: ' . $e->getMessage());
+            }
+            
+            // Start transaction
+            $connection->begin();
+            
+            try {
+                // Import order: role levels → job roles → job role relationships → employees → employee relationships
+                $roleLevelsResult = $this->importAllRoleLevelsFromOrgtrakker($companyId);
+                $jobRolesResult = $this->importAllJobRolesFromOrgtrakker($companyId);
+                $jobRoleRelationshipsResult = $this->importAllJobRoleReportingRelationships($companyId);
+                $employeesResult = $this->importAllEmployeesFromOrgtrakker($companyId);
+                $employeeRelationshipsResult = $this->importAllEmployeeReportingRelationships($companyId);
+                
+                // Normalize results to arrays
+                $roleLevelsImported = is_array($roleLevelsResult) ? ($roleLevelsResult['imported'] ?? $roleLevelsResult) : $roleLevelsResult;
+                $roleLevelsUpdated = is_array($roleLevelsResult) ? ($roleLevelsResult['updated'] ?? 0) : 0;
+                $jobRolesImported = is_array($jobRolesResult) ? ($jobRolesResult['imported'] ?? $jobRolesResult) : $jobRolesResult;
+                $jobRolesUpdated = is_array($jobRolesResult) ? ($jobRolesResult['updated'] ?? 0) : 0;
+                $jobRoleRelationshipsImported = is_array($jobRoleRelationshipsResult) ? ($jobRoleRelationshipsResult['imported'] ?? $jobRoleRelationshipsResult) : $jobRoleRelationshipsResult;
+                $jobRoleRelationshipsUpdated = is_array($jobRoleRelationshipsResult) ? ($jobRoleRelationshipsResult['updated'] ?? 0) : 0;
+                $employeesImported = is_array($employeesResult) ? ($employeesResult['imported'] ?? 0) : 0;
+                $employeesUpdated = is_array($employeesResult) ? ($employeesResult['updated'] ?? 0) : 0;
+                $employeeRelationshipsImported = is_array($employeeRelationshipsResult) ? ($employeeRelationshipsResult['imported'] ?? $employeeRelationshipsResult) : $employeeRelationshipsResult;
+                $employeeRelationshipsUpdated = is_array($employeeRelationshipsResult) ? ($employeeRelationshipsResult['updated'] ?? 0) : 0;
+                
+                // Commit transaction
+                $connection->commit();
+                
+                // Log audit action for each newly imported employee (not updated ones)
+                if ($employeesImported > 0) {
+                    $importedEmployees = $EmployeeTemplateAnswersTable->find()
+                        ->select(['employee_unique_id', 'username'])
+                        ->where([
+                            'company_id' => $companyId,
+                            'deleted' => false,
+                        ])
+                        ->order(['created' => 'DESC'])
+                        ->limit($employeesImported)
+                        ->toArray();
+                    
+                    foreach ($importedEmployees as $emp) {
+                        AuditHelper::logEmployeeAction(
+                            'IMPORT',
+                            $emp->employee_unique_id,
+                            $emp->username ?? '',
+                            AuditHelper::extractUserData($authResult),
+                            $this->request
+                        );
+                    }
+                }
+                
+                return $this->response
+                    ->withType('application/json')
+                    ->withStringBody(json_encode([
+                        'success' => true,
+                        'message' => 'Import completed successfully',
+                        'role_levels' => ['imported' => $roleLevelsImported, 'updated' => $roleLevelsUpdated],
+                        'job_roles' => ['imported' => $jobRolesImported, 'updated' => $jobRolesUpdated],
+                        'job_role_relationships' => ['imported' => $jobRoleRelationshipsImported, 'updated' => $jobRoleRelationshipsUpdated],
+                        'employees' => ['imported' => $employeesImported, 'updated' => $employeesUpdated],
+                        'employee_relationships' => ['imported' => $employeeRelationshipsImported, 'updated' => $employeeRelationshipsUpdated],
+                    ]));
+                    
+            } catch (\Exception $e) {
+                // Rollback on any failure
+                $connection->rollback();
+                throw $e;
+            }
+            
+        } catch (\Exception $e) {
+            Log::error('Error importing all orgtrakker employees: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString()
+            ]);
+            return $this->response
+                ->withStatus(500)
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => false,
+                    'message' => 'Error importing employees: ' . $e->getMessage(),
+                ]));
+        }
     }
 }
