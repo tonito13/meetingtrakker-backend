@@ -14,6 +14,14 @@ use Cake\TestSuite\Fixture\TestFixture;
 class EmployeeAnswerFilesFixture extends TestFixture
 {
     /**
+     * Connection name to use for this fixture
+     * Company-specific tables should use the company-specific test database
+     * 
+     * @var string
+     */
+    public string $connection = 'test_client_200001';
+
+    /**
      * Table name
      *
      * @var string

@@ -6,20 +6,19 @@ namespace App\Test\Fixture;
 use Cake\TestSuite\Fixture\TestFixture;
 
 /**
- * RoleLevelsFixture
- *
- * Test fixture for RoleLevels model.
- * Provides comprehensive test data for role levels testing.
+ * OrgtrakkerRoleLevelsFixture
+ * 
+ * This fixture provides mock orgtrakker role level data for import testing.
  */
-class RoleLevelsFixture extends TestFixture
+class OrgtrakkerRoleLevelsFixture extends TestFixture
 {
     /**
      * Connection name to use for this fixture
-     * Company-specific tables should use the company-specific test database
+     * Orgtrakker test data should use the orgtrakker test database
      * 
      * @var string
      */
-    public string $connection = 'test_client_200001';
+    public string $connection = 'test_orgtrakker_100000';
 
     /**
      * Table name
@@ -30,19 +29,19 @@ class RoleLevelsFixture extends TestFixture
 
     /**
      * Fields configuration
-     *
+     * 
      * @var array
      */
     public array $fields = [
         'id' => ['type' => 'integer', 'length' => null, 'unsigned' => false, 'null' => false, 'default' => null, 'comment' => '', 'precision' => null, 'autoIncrement' => true],
         'company_id' => ['type' => 'integer', 'length' => null, 'unsigned' => false, 'null' => false, 'default' => null, 'comment' => '', 'precision' => null],
         'level_unique_id' => ['type' => 'string', 'length' => 150, 'null' => false, 'default' => null, 'comment' => '', 'precision' => null],
-        'template_id' => ['type' => 'integer', 'length' => null, 'unsigned' => false, 'null' => false, 'default' => null, 'comment' => '', 'precision' => null],
         'name' => ['type' => 'string', 'length' => 255, 'null' => false, 'default' => null, 'comment' => '', 'precision' => null],
         'rank' => ['type' => 'integer', 'length' => null, 'unsigned' => false, 'null' => false, 'default' => null, 'comment' => '', 'precision' => null],
         'custom_fields' => ['type' => 'json', 'length' => null, 'null' => true, 'default' => null, 'comment' => '', 'precision' => null],
-        'created_by' => ['type' => 'string', 'length' => 150, 'null' => false, 'default' => null, 'comment' => '', 'precision' => null],
+        'template_id' => ['type' => 'integer', 'length' => null, 'unsigned' => false, 'null' => false, 'default' => null, 'comment' => '', 'precision' => null],
         'deleted' => ['type' => 'boolean', 'length' => null, 'null' => false, 'default' => false, 'comment' => '', 'precision' => null],
+        'created_by' => ['type' => 'string', 'length' => 150, 'null' => false, 'default' => null, 'comment' => '', 'precision' => null],
         'created' => ['type' => 'datetime', 'length' => null, 'null' => true, 'default' => 'CURRENT_TIMESTAMP', 'comment' => '', 'precision' => null],
         'modified' => ['type' => 'datetime', 'length' => null, 'null' => true, 'default' => 'CURRENT_TIMESTAMP', 'comment' => '', 'precision' => null],
         '_constraints' => [
@@ -63,70 +62,64 @@ class RoleLevelsFixture extends TestFixture
     {
         $this->records = [
             [
-                'id' => 1001,
-                'company_id' => 200001,
-                'level_unique_id' => 'rl-20240101-ABCD1234',
+                'id' => 3001,
+                'company_id' => 100000,
+                'level_unique_id' => 'org-level-001',
+                'name' => 'Junior',
+                'rank' => 10,
                 'template_id' => 4001,
-                'name' => 'Junior Level',
-                'rank' => 1,
                 'custom_fields' => json_encode([
-                    'description' => 'Entry level position',
-                    'requirements' => ['Basic skills', 'Willingness to learn'],
+                    'level_info' => [
+                        'level_name' => 'Junior',
+                        'rank' => 10,
+                        'description' => 'Junior level position',
+                    ]
                 ]),
-                'created_by' => 'admin',
                 'deleted' => false,
-                'created' => '2024-01-01 00:00:00',
-                'modified' => '2024-01-01 00:00:00',
+                'created_by' => 'admin',
+                'created' => '2024-01-01 10:00:00',
+                'modified' => '2024-01-01 10:00:00',
             ],
             [
-                'id' => 1002,
-                'company_id' => 200001,
-                'level_unique_id' => 'rl-20240102-EFGH5678',
+                'id' => 3002,
+                'company_id' => 100000,
+                'level_unique_id' => 'org-level-002',
+                'name' => 'Senior',
+                'rank' => 20,
                 'template_id' => 4001,
-                'name' => 'Senior Level',
-                'rank' => 3,
                 'custom_fields' => json_encode([
-                    'description' => 'Senior level position',
-                    'requirements' => ['Advanced skills', 'Leadership experience'],
+                    'level_info' => [
+                        'level_name' => 'Senior',
+                        'rank' => 20,
+                        'description' => 'Senior level position',
+                    ]
                 ]),
-                'created_by' => 'admin',
                 'deleted' => false,
-                'created' => '2024-01-02 00:00:00',
-                'modified' => '2024-01-02 00:00:00',
+                'created_by' => 'admin',
+                'created' => '2024-01-01 10:00:00',
+                'modified' => '2024-01-01 10:00:00',
             ],
             [
-                'id' => 1003,
-                'company_id' => 200001,
-                'level_unique_id' => 'rl-20240103-IJKL9012',
+                'id' => 3003,
+                'company_id' => 100000,
+                'level_unique_id' => 'org-level-003',
+                'name' => 'Lead',
+                'rank' => 30,
                 'template_id' => 4001,
-                'name' => 'Manager Level',
-                'rank' => 5,
                 'custom_fields' => json_encode([
-                    'description' => 'Management level position',
-                    'requirements' => ['Management experience', 'Strategic thinking'],
+                    'level_info' => [
+                        'level_name' => 'Lead',
+                        'rank' => 30,
+                        'description' => 'Lead level position',
+                    ]
                 ]),
-                'created_by' => 'admin',
-                'deleted' => true,
-                'created' => '2024-01-03 00:00:00',
-                'modified' => '2024-01-03 00:00:00',
-            ],
-            [
-                'id' => 1004,
-                'company_id' => 200002,
-                'level_unique_id' => 'rl-20240104-MNOP3456',
-                'template_id' => 4001,
-                'name' => 'Executive Level',
-                'rank' => 7,
-                'custom_fields' => json_encode([
-                    'description' => 'Executive level position',
-                    'requirements' => ['Executive experience', 'Visionary leadership'],
-                ]),
-                'created_by' => 'admin',
                 'deleted' => false,
-                'created' => '2024-01-04 00:00:00',
-                'modified' => '2024-01-04 00:00:00',
+                'created_by' => 'admin',
+                'created' => '2024-01-01 10:00:00',
+                'modified' => '2024-01-01 10:00:00',
             ],
         ];
         parent::init();
     }
 }
+

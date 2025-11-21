@@ -43,6 +43,9 @@ class EmployeeTemplateAnswersTable extends Table
         $this->setDisplayField('employee_unique_id');
         $this->setPrimaryKey('id');
 
+        // Configure answers field as JSON type for automatic encoding/decoding
+        $this->getSchema()->setColumnType('answers', 'json');
+
         $this->addBehavior('Timestamp');
     }
 
@@ -72,7 +75,7 @@ class EmployeeTemplateAnswersTable extends Table
 
         $validator
             ->requirePresence('answers', 'create')
-            ->notEmptyString('answers');
+            ->notEmptyArray('answers', 'Answers must be provided');
 
         $validator
             ->boolean('deleted')

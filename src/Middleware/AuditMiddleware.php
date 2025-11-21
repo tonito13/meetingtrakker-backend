@@ -57,47 +57,69 @@ class AuditMiddleware implements MiddlewareInterface
                 '/api/audit-logs/getAuditLogs.json',
                 '/api/audit-logs/getAuditStats.json',
                 '/api/audit-logs/getFilterOptions.json',
+                '/api/users/login.json',
+                '/api/users/login',
             ];
 
-            if (in_array($path, $skipPaths)) {
+            if (in_array($path, $skipPaths) || strpos($path, '/login') !== false) {
                 return;
             }
 
             // Extract user information from request attributes
             $user = $request->getAttribute('identity');
+            
+            // Skip if no authenticated user (shouldn't happen for API, but be safe)
+            if (!$user) {
+                return;
+            }
+            
             $companyId = $this->extractCompanyId($request, $user);
             
             if (!$companyId) {
+                Log::debug('AuditMiddleware: Skipping audit - no company ID', [
+                    'path' => $path,
+                    'user_id' => $user->id ?? null,
+                    'username' => $user->username ?? null
+                ]);
                 return; // Skip if no company ID
             }
 
-            $auditService = new AuditService($companyId);
+            try {
+                $auditService = new AuditService($companyId);
 
-            // Determine action and entity type from request
-            $action = $this->determineAction($request);
-            $entityType = $this->determineEntityType($request);
-            $entityId = $this->extractEntityId($request);
-            $entityName = $this->extractEntityName($request);
+                // Determine action and entity type from request
+                $action = $this->determineAction($request);
+                $entityType = $this->determineEntityType($request);
+                $entityId = $this->extractEntityId($request);
+                $entityName = $this->extractEntityName($request);
 
-            // Prepare audit data
-            $auditData = [
-                'user_id' => $user->id ?? 0,
-                'username' => $user->username ?? 'system',
-                'action' => $action,
-                'entity_type' => $entityType,
-                'entity_id' => $entityId,
-                'entity_name' => $entityName,
-                'description' => $this->generateDescription($action, $entityType, $entityName),
-                'ip_address' => $request->clientIp(),
-                'user_agent' => $request->getHeaderLine('User-Agent'),
-                'request_data' => $this->sanitizeRequestData($request),
-                'response_data' => $this->sanitizeResponseData($response),
-                'status' => $this->determineStatus($response),
-                'error_message' => $this->extractErrorMessage($response),
-            ];
+                // Prepare audit data
+                $auditData = [
+                    'user_id' => $user->id ?? 0,
+                    'username' => $user->username ?? 'system',
+                    'action' => $action,
+                    'entity_type' => $entityType,
+                    'entity_id' => $entityId,
+                    'entity_name' => $entityName,
+                    'description' => $this->generateDescription($action, $entityType, $entityName),
+                    'ip_address' => $request->clientIp(),
+                    'user_agent' => $request->getHeaderLine('User-Agent'),
+                    'request_data' => $this->sanitizeRequestData($request),
+                    'response_data' => $this->sanitizeResponseData($response),
+                    'status' => $this->determineStatus($response),
+                    'error_message' => $this->extractErrorMessage($response),
+                ];
 
-            // Log the audit entry
-            $auditService->logAction($auditData);
+                // Log the audit entry (non-blocking - failures won't break the request)
+                $auditService->logAction($auditData);
+            } catch (\Exception $e) {
+                // Log error but don't break the request
+                Log::error('AuditMiddleware: Error in audit logging', [
+                    'error' => $e->getMessage(),
+                    'path' => $path,
+                    'trace' => $e->getTraceAsString()
+                ]);
+            }
 
         } catch (\Exception $e) {
             // Don't let audit logging break the main request
@@ -298,8 +320,13 @@ class AuditMiddleware implements MiddlewareInterface
      */
     private function sanitizeResponseData(ResponseInterface $response): array
     {
-        $body = $response->getBody()->getContents();
-        $data = json_decode($body, true) ?? [];
+        // Clone the stream to avoid consuming the original response body
+        $body = $response->getBody();
+        $body->rewind();
+        $contents = $body->getContents();
+        $body->rewind(); // Rewind for subsequent reads
+        
+        $data = json_decode($contents, true) ?? [];
 
         // Only log success/error status, not full response data
         return [

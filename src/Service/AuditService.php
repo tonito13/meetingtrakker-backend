@@ -8,6 +8,7 @@ use App\Model\Table\AuditLogsTable;
 use App\Model\Table\AuditLogDetailsTable;
 use Cake\ORM\TableRegistry;
 use Cake\Log\Log;
+use Cake\Utility\Text;
 use Exception;
 
 /**
@@ -23,10 +24,37 @@ class AuditService
 
     public function __construct(string $companyId = 'default')
     {
+        if (!isset($GLOBALS['audit_debug'])) {
+            $GLOBALS['audit_debug'] = [];
+        }
+        $GLOBALS['audit_debug']['service_construct_called'] = true;
+        $GLOBALS['audit_debug']['service_company_id'] = $companyId;
+        
         $this->companyId = $companyId;
         
+        Log::debug('🔍 DEBUG: AuditService::__construct - START', [
+            'company_id' => $companyId
+        ]);
+        
         // Get company-specific database connection
-        $connection = $this->getConnection($companyId);
+        try {
+            $connection = $this->getConnection($companyId);
+            $connectionName = $connection->configName();
+            $connectionConfig = $connection->config();
+            
+            $GLOBALS['audit_debug']['connection_name'] = $connectionName;
+            $GLOBALS['audit_debug']['database'] = $connectionConfig['database'] ?? 'unknown';
+            $GLOBALS['audit_debug']['connection_success'] = true;
+            
+            Log::debug('🔍 DEBUG: AuditService::__construct - Connection established', [
+                'connection_name' => $connectionName,
+                'database' => $connectionConfig['database'] ?? 'unknown',
+                'company_id' => $companyId
+            ]);
+        } catch (\Exception $e) {
+            $GLOBALS['audit_debug']['connection_error'] = $e->getMessage();
+            throw $e;
+        }
         
         // Get table locator
         $locator = TableRegistry::getTableLocator();
@@ -55,11 +83,27 @@ class AuditService
             'connection' => $connection
         ]);
         
+        $GLOBALS['audit_debug']['tables_initialized'] = true;
+        $GLOBALS['audit_debug']['audit_logs_table'] = $this->auditLogsTable->getTable();
+        $GLOBALS['audit_debug']['audit_logs_connection'] = $this->auditLogsTable->getConnection()->configName();
+        
+        Log::debug('🔍 DEBUG: AuditService::__construct - Tables initialized', [
+            'audit_logs_table' => $this->auditLogsTable->getTable(),
+            'audit_log_details_table' => $this->auditLogDetailsTable->getTable(),
+            'audit_logs_connection' => $this->auditLogsTable->getConnection()->configName(),
+            'audit_log_details_connection' => $this->auditLogDetailsTable->getConnection()->configName(),
+            'company_id' => $companyId
+        ]);
+        
         // Configure the association to use the correct table instance
         $association = $this->auditLogsTable->getAssociation('AuditLogDetails');
         if ($association) {
             $association->setTarget($this->auditLogDetailsTable);
         }
+        
+        Log::debug('🔍 DEBUG: AuditService::__construct - COMPLETE', [
+            'company_id' => $companyId
+        ]);
     }
 
     /**
@@ -70,10 +114,59 @@ class AuditService
      */
     private function getConnection(string $companyId)
     {
-        if ($companyId === 'default') {
-            return \Cake\Datasource\ConnectionManager::get('default');
+        try {
+            if ($companyId === 'default') {
+                $connection = \Cake\Datasource\ConnectionManager::get('default');
+                Log::debug('🔍 DEBUG: AuditService::getConnection - Using default connection', [
+                    'company_id' => $companyId,
+                    'connection_name' => 'default',
+                    'database' => $connection->config()['database'] ?? 'unknown'
+                ]);
+                return $connection;
+            }
+            
+            // In test environment, use the test company database connection for company-specific tables
+            if (\Cake\Core\Configure::read('debug') && php_sapi_name() === 'cli') {
+                // Try the alias first (test_client_{companyId}), then the direct connection name
+                $testConnectionName = 'test_client_' . $companyId;
+                $directConnectionName = 'client_' . $companyId . '_test';
+                
+                try {
+                    // First try the alias (created in tests/bootstrap.php)
+                    $connection = \Cake\Datasource\ConnectionManager::get($testConnectionName);
+                } catch (\Exception $e1) {
+                    try {
+                        // Fallback to direct connection name
+                        $connection = \Cake\Datasource\ConnectionManager::get($directConnectionName);
+                    } catch (\Exception $e2) {
+                        // If neither connection exists, throw a clear error
+                        throw new \Exception(
+                            "Test company database connection not found. Tried '{$testConnectionName}' and '{$directConnectionName}'. " .
+                            "Company-specific tables should never use the central 'test' database. " .
+                            "Error 1: " . $e1->getMessage() . " Error 2: " . $e2->getMessage()
+                        );
+                    }
+                }
+            } else {
+                $connectionName = 'client_' . $companyId;
+                $connection = \Cake\Datasource\ConnectionManager::get($connectionName);
+            }
+            
+            Log::debug('🔍 DEBUG: AuditService::getConnection - Using company connection', [
+                'company_id' => $companyId,
+                'connection_name' => $connection->configName(),
+                'database' => $connection->config()['database'] ?? 'unknown'
+            ]);
+            
+            return $connection;
+        } catch (\Exception $e) {
+            Log::error('🔍 ERROR: AuditService::getConnection - Failed to get connection', [
+                'company_id' => $companyId,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            throw $e;
         }
-        return \Cake\Datasource\ConnectionManager::get('client_' . $companyId);
     }
 
     /**
@@ -84,13 +177,84 @@ class AuditService
      */
     public function logAction(array $data): ?\App\Model\Entity\AuditLog
     {
-        Log::debug('🔍 DEBUG: AuditService::logAction - Input data', [
-            'data' => $data,
-            'company_id' => $this->companyId
+        if (!isset($GLOBALS['audit_debug'])) {
+            $GLOBALS['audit_debug'] = [];
+        }
+        $GLOBALS['audit_debug']['log_action_called'] = true;
+        $GLOBALS['audit_debug']['log_action'] = $data['action'] ?? 'UNKNOWN';
+        $GLOBALS['audit_debug']['log_entity_type'] = $data['entity_type'] ?? 'unknown';
+        
+        Log::debug('🔍 DEBUG: AuditService::logAction - START', [
+            'company_id' => $this->companyId,
+            'action' => $data['action'] ?? 'UNKNOWN',
+            'entity_type' => $data['entity_type'] ?? 'unknown'
         ]);
 
         try {
+            // Verify connection
+            $connection = $this->auditLogsTable->getConnection();
+            $connectionName = $connection->configName();
+            $connectionConfig = $connection->config();
+            
+            Log::debug('🔍 DEBUG: AuditService::logAction - Connection info', [
+                'connection_name' => $connectionName,
+                'database' => $connectionConfig['database'] ?? 'unknown',
+                'company_id' => $this->companyId
+            ]);
+            
+            // Verify table exists
+            try {
+                $schema = $connection->getSchemaCollection();
+                $tables = $schema->listTables();
+                $tableExists = in_array('audit_logs', $tables);
+                
+                $GLOBALS['audit_debug']['table_check'] = true;
+                $GLOBALS['audit_debug']['table_exists'] = $tableExists;
+                $GLOBALS['audit_debug']['available_tables_count'] = count($tables);
+                $GLOBALS['audit_debug']['sample_tables'] = array_slice($tables, 0, 10);
+                
+                Log::debug('🔍 DEBUG: AuditService::logAction - Table check', [
+                    'table_exists' => $tableExists,
+                    'table_name' => 'audit_logs',
+                    'available_tables_count' => count($tables),
+                    'sample_tables' => array_slice($tables, 0, 10)
+                ]);
+                
+                if (!$tableExists) {
+                    $GLOBALS['audit_debug']['table_not_found'] = true;
+                    $GLOBALS['audit_debug']['available_tables'] = $tables;
+                    
+                    Log::error('🔍 ERROR: AuditService::logAction - audit_logs table does not exist', [
+                        'connection' => $connectionName,
+                        'database' => $connectionConfig['database'] ?? 'unknown',
+                        'company_id' => $this->companyId,
+                        'available_tables' => $tables
+                    ]);
+                    return null;
+                }
+            } catch (\Exception $e) {
+                $GLOBALS['audit_debug']['table_check_error'] = $e->getMessage();
+                
+                Log::error('🔍 ERROR: AuditService::logAction - Failed to check table existence', [
+                    'error' => $e->getMessage(),
+                    'connection' => $connectionName,
+                    'company_id' => $this->companyId,
+                    'trace' => $e->getTraceAsString()
+                ]);
+                return null;
+            }
+            
+            // Generate UUID for audit log if not provided
+            $id = $data['id'] ?? Text::uuid();
+            
+            // Prepare user_data - keep as array for JSONB, CakePHP will handle conversion
+            $userData = $data['user_data'] ?? [];
+            if (is_string($userData)) {
+                $userData = json_decode($userData, true) ?: [];
+            }
+            
             $auditLogData = [
+                'id' => $id,
                 'company_id' => $this->companyId,
                 'user_id' => $data['user_id'] ?? 0,
                 'username' => $data['username'] ?? 'system',
@@ -105,34 +269,72 @@ class AuditService
                 'response_data' => $data['response_data'] ?? null,
                 'status' => $data['status'] ?? 'success',
                 'error_message' => $data['error_message'] ?? null,
-                'user_data' => json_encode($data['user_data'] ?? []),
+                'user_data' => $userData, // Keep as array for JSONB
             ];
 
-            Log::debug('🔍 DEBUG: AuditService::logAction - Audit log data', [
-                'audit_log_data' => $auditLogData,
-                'user_data_json' => $auditLogData['user_data']
+            Log::debug('🔍 DEBUG: AuditService::logAction - Creating entity', [
+                'audit_log_data_keys' => array_keys($auditLogData),
+                'id' => $id,
+                'company_id' => $this->companyId
             ]);
 
             $auditLog = $this->auditLogsTable->newEntity($auditLogData);
+            
+            // Check for validation errors
+            if ($auditLog->hasErrors()) {
+                $GLOBALS['audit_debug']['validation_errors'] = $auditLog->getErrors();
+                
+                Log::error('🔍 ERROR: AuditService::logAction - Validation errors', [
+                    'errors' => $auditLog->getErrors(),
+                    'audit_log_data' => $auditLogData
+                ]);
+                return null;
+            }
+
+            Log::debug('🔍 DEBUG: AuditService::logAction - Attempting save', [
+                'entity_id' => $auditLog->id ?? 'not_set',
+                'company_id' => $this->companyId
+            ]);
 
             if ($this->auditLogsTable->save($auditLog)) {
-                Log::debug('🔍 DEBUG: AuditService::logAction - Audit log saved successfully', [
+                $GLOBALS['audit_debug']['save_success'] = true;
+                $GLOBALS['audit_debug']['audit_log_id'] = $auditLog->id;
+                
+                Log::debug('🔍 DEBUG: AuditService::logAction - SUCCESS - Audit log saved', [
                     'audit_log_id' => $auditLog->id,
                     'entity_name' => $auditLog->entity_name,
-                    'username' => $auditLog->username
+                    'username' => $auditLog->username,
+                    'connection' => $connectionName,
+                    'database' => $connectionConfig['database'] ?? 'unknown'
                 ]);
                 return $auditLog;
             }
 
-            Log::error('Failed to save audit log', [
+            $GLOBALS['audit_debug']['save_failed'] = true;
+            $GLOBALS['audit_debug']['save_errors'] = $auditLog->getErrors();
+            
+            Log::error('🔍 ERROR: AuditService::logAction - FAILED to save audit log', [
                 'data' => $data,
-                'errors' => $auditLog->getErrors()
+                'errors' => $auditLog->getErrors(),
+                'connection' => $connectionName,
+                'database' => $connectionConfig['database'] ?? 'unknown',
+                'company_id' => $this->companyId,
+                'entity_data' => $auditLog->toArray()
             ]);
 
             return null;
-        } catch (Exception $e) {
-            Log::error('Error logging audit action: ' . $e->getMessage(), [
+        } catch (\Throwable $e) {
+            $GLOBALS['audit_debug']['exception'] = true;
+            $GLOBALS['audit_debug']['exception_message'] = $e->getMessage();
+            $GLOBALS['audit_debug']['exception_file'] = $e->getFile();
+            $GLOBALS['audit_debug']['exception_line'] = $e->getLine();
+            
+            Log::error('🔍 ERROR: AuditService::logAction - EXCEPTION', [
+                'error' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
                 'data' => $data,
+                'company_id' => $this->companyId,
                 'trace' => $e->getTraceAsString()
             ]);
             return null;
@@ -185,6 +387,7 @@ class AuditService
                     ]);
                     
                     $auditLogDetail = $this->auditLogDetailsTable->newEntity([
+                        'id' => Text::uuid(),
                         'audit_log_id' => $auditLog->id,
                         'field_name' => $detail['field_name'] ?? '',
                         'field_label' => $detail['field_label'] ?? null,
@@ -248,9 +451,17 @@ class AuditService
         array $responseData = [],
         array $fieldChanges = []
     ): ?\App\Model\Entity\AuditLog {
+        // Determine the display name (full_name > employee_name > username > 'system')
+        $displayName = $userData['full_name'] ?? $userData['employee_name'] ?? $userData['username'] ?? 'system';
+        
+        // If display name is empty or 'Unknown', try to fetch it again
+        if (empty($displayName) || $displayName === 'Unknown') {
+            $displayName = $userData['username'] ?? 'system';
+        }
+        
         $data = [
             'user_id' => $userData['user_id'] ?? 0,
-            'username' => $userData['username'] ?? 'system',
+            'username' => $displayName,
             'action' => $action,
             'entity_type' => 'scorecard',
             'entity_id' => $scorecardId,
@@ -262,6 +473,7 @@ class AuditService
             'response_data' => $responseData,
             'status' => $userData['status'] ?? 'success',
             'error_message' => $userData['error_message'] ?? null,
+            'user_data' => $userData, // Include full user data with full_name
         ];
 
         if (!empty($fieldChanges)) {
@@ -292,9 +504,17 @@ class AuditService
         array $responseData = [],
         array $fieldChanges = []
     ): ?\App\Model\Entity\AuditLog {
+        // Determine the display name (full_name > employee_name > username > 'system')
+        $displayName = $userData['full_name'] ?? $userData['employee_name'] ?? $userData['username'] ?? 'system';
+        
+        // If display name is empty or 'Unknown', try to fetch it again
+        if (empty($displayName) || $displayName === 'Unknown') {
+            $displayName = $userData['username'] ?? 'system';
+        }
+        
         $data = [
             'user_id' => $userData['user_id'] ?? 0,
-            'username' => $userData['username'] ?? 'system',
+            'username' => $displayName,
             'action' => $action,
             'entity_type' => 'employee',
             'entity_id' => $employeeId,
@@ -312,6 +532,71 @@ class AuditService
         if (!empty($fieldChanges)) {
             return $this->logActionWithDetails($data, $fieldChanges);
         }
+
+        return $this->logAction($data);
+    }
+
+    /**
+     * Log a bulk import action
+     *
+     * @param string $entityType 'employee' or 'role_level'
+     * @param int $importedCount Number of items imported
+     * @param array $userData User data for audit
+     * @param array $requestData Request data
+     * @param array $responseData Response data
+     * @return \App\Model\Entity\AuditLog|null
+     */
+    public function logBulkImportAction(
+        string $entityType,
+        int $importedCount,
+        array $userData,
+        array $requestData = [],
+        array $responseData = []
+    ): ?\App\Model\Entity\AuditLog {
+        // Determine the display name (full_name > employee_name > username > 'system')
+        $displayName = $userData['full_name'] ?? $userData['employee_name'] ?? $userData['username'] ?? 'system';
+        
+        // If display name is empty or 'Unknown', try to fetch it again
+        if (empty($displayName) || $displayName === 'Unknown') {
+            $displayName = $userData['username'] ?? 'system';
+        }
+        
+        // Format entity type for display (readable names)
+        $entityDisplayName = match($entityType) {
+            'employee' => 'Employee',
+            'role_level' => 'Role Level',
+            'job_role' => 'Job Role',
+            'job_role_relationship' => 'Job Role Relationship',
+            'employee_relationship' => 'Employee Relationship',
+            default => ucfirst(str_replace('_', ' ', $entityType))
+        };
+        
+        // Create entity name with quantity (for subheader)
+        $entityName = $importedCount === 1 
+            ? "1 {$entityDisplayName}" 
+            : "{$importedCount} {$entityDisplayName}s";
+        
+        // Create description (for subheader) - quantity + entity type + "Imported"
+        $description = $importedCount === 1
+            ? "1 {$entityDisplayName} Imported"
+            : "{$importedCount} {$entityDisplayName}s Imported";
+        
+        $data = [
+            'user_id' => $userData['user_id'] ?? 0,
+            'username' => $displayName,
+            'action' => 'IMPORT',
+            'entity_type' => $entityType,
+            'entity_id' => null, // Bulk import doesn't have a single entity ID
+            'entity_name' => $entityName,
+            'description' => $description,
+            'ip_address' => $userData['ip_address'] ?? null,
+            'user_agent' => $userData['user_agent'] ?? null,
+            'request_data' => array_merge($requestData, ['imported_count' => $importedCount]),
+            'response_data' => $responseData,
+            'status' => $userData['status'] ?? 'success',
+            'error_message' => $userData['error_message'] ?? null,
+            'user_data' => $userData,
+        ];
 
         return $this->logAction($data);
     }
@@ -360,6 +645,9 @@ class AuditService
     public function getAuditLogs(array $options = []): array
     {
         $query = $this->auditLogsTable->find('filtered', $options);
+        
+        // Include audit log details
+        $query->contain(['AuditLogDetails']);
 
         // Pagination
         $page = (int)($options['page'] ?? 1);
@@ -584,9 +872,17 @@ class AuditService
             'field_changes_empty' => empty($fieldChanges)
         ]);
 
+        // Determine the display name (full_name > employee_name > username > 'system')
+        $displayName = $userData['full_name'] ?? $userData['employee_name'] ?? $userData['username'] ?? 'system';
+        
+        // If display name is empty or 'Unknown', try to fetch it again
+        if (empty($displayName) || $displayName === 'Unknown') {
+            $displayName = $userData['username'] ?? 'system';
+        }
+        
         $data = [
             'user_id' => $userData['user_id'] ?? 0,
-            'username' => $userData['username'] ?? 'system',
+            'username' => $displayName,
             'action' => $action,
             'entity_type' => 'role_level',
             'entity_id' => $roleLevelId,
@@ -598,10 +894,16 @@ class AuditService
             'response_data' => $responseData,
             'status' => $userData['status'] ?? 'success',
             'error_message' => $userData['error_message'] ?? null,
+            'user_data' => $userData, // Include full user data with full_name
         ];
 
         Log::debug('🔍 DEBUG: AuditService::logRoleLevelAction - Data array', [
             'data' => $data,
+            'user_data_keys' => array_keys($userData),
+            'user_data_full_name' => $userData['full_name'] ?? 'NOT_SET',
+            'user_data_employee_name' => $userData['employee_name'] ?? 'NOT_SET',
+            'user_data_username' => $userData['username'] ?? 'NOT_SET',
+            'display_name' => $displayName,
             'field_changes' => $fieldChanges,
             'field_changes_empty' => empty($fieldChanges)
         ]);
@@ -657,9 +959,17 @@ class AuditService
             'field_changes_empty' => empty($fieldChanges)
         ]);
 
+        // Determine the display name (full_name > employee_name > username > 'system')
+        $displayName = $userData['full_name'] ?? $userData['employee_name'] ?? $userData['username'] ?? 'system';
+        
+        // If display name is empty or 'Unknown', try to fetch it again
+        if (empty($displayName) || $displayName === 'Unknown') {
+            $displayName = $userData['username'] ?? 'system';
+        }
+        
         $data = [
             'user_id' => $userData['user_id'] ?? 0,
-            'username' => $userData['username'] ?? 'system',
+            'username' => $displayName,
             'action' => $action,
             'entity_type' => 'job_role',
             'entity_id' => $jobRoleId,
@@ -671,6 +981,7 @@ class AuditService
             'response_data' => $responseData,
             'status' => $userData['status'] ?? 'success',
             'error_message' => $userData['error_message'] ?? null,
+            'user_data' => $userData, // Include full user data with full_name
         ];
 
         Log::debug('🔍 DEBUG: AuditService::logJobRoleAction - Data array', [

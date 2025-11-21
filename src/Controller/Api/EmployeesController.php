@@ -13,6 +13,7 @@ use Exception;
 use Cake\Log\Log;
 use Cake\Database\Connection;
 use Cake\Datasource\ConnectionManager;
+use Cake\ORM\TableRegistry;
 
 class EmployeesController extends ApiController
 {
@@ -281,12 +282,77 @@ class EmployeesController extends ApiController
             $connection->commit();
 
             // Extract employee name for audit logging
-            $employeeName = AuditHelper::extractEmployeeName($answerData);
+            // Handle both JSON string and array formats
+            $employeeAnswers = $answerData;
+            if (is_string($employeeAnswers)) {
+                $employeeAnswers = json_decode($employeeAnswers, true) ?? [];
+            }
+            $employeeName = AuditHelper::extractEmployeeName($employeeAnswers);
+            
+            // Fallback to username if name extraction fails
+            if (empty($employeeName) || $employeeName === 'Unnamed Employee') {
+                $employeeName = $username ?? $employeeUniqueId ?? 'Unknown Employee';
+            }
             
             // Extract user data for audit logging
             $auditUserData = AuditHelper::extractUserData($authResult);
             
-            // Log employee creation
+            // Override company_id and username with the correct values from controller
+            $authData = $authResult->getData();
+            $username = null;
+            if ($authData instanceof \ArrayObject || is_array($authData)) {
+                $username = $authData['username'] ?? $authData['sub'] ?? null;
+            } elseif (is_object($authData)) {
+                $username = $authData->username ?? $authData->sub ?? null;
+            }
+            
+            $auditUserData['company_id'] = (string)$companyId;
+            $auditUserData['username'] = $username ?? $auditUserData['username'] ?? 'system';
+            $auditUserData['user_id'] = $authData->id ?? $authData['id'] ?? $authData->sub ?? $authData['sub'] ?? $auditUserData['user_id'] ?? 0;
+            
+            // If we now have a user_id but full_name wasn't fetched, fetch it now
+            if (!empty($auditUserData['user_id']) && (empty($auditUserData['full_name']) || $auditUserData['full_name'] === 'Unknown')) {
+                try {
+                    $usersTable = TableRegistry::getTableLocator()->get('Users', [
+                        'connection' => ConnectionManager::get('default')
+                    ]);
+                    
+                    $user = $usersTable->find()
+                        ->select(['first_name', 'last_name'])
+                        ->where(['id' => $auditUserData['user_id']])
+                        ->first();
+                    
+                    if ($user) {
+                        $firstName = $user->first_name ?? '';
+                        $lastName = $user->last_name ?? '';
+                        $fullName = trim($firstName . ' ' . $lastName);
+                        if (!empty($fullName)) {
+                            $auditUserData['full_name'] = $fullName;
+                            $auditUserData['employee_name'] = $fullName;
+                        }
+                    }
+                } catch (\Exception $e) {
+                    Log::error('Error fetching user full name in controller: ' . $e->getMessage());
+                }
+            }
+            
+            // Ensure full_name is preserved (don't overwrite it if it was already fetched)
+            if (empty($auditUserData['full_name']) && !empty($auditUserData['employee_name'])) {
+                $auditUserData['full_name'] = $auditUserData['employee_name'];
+            }
+            
+            // Initialize debug info
+            $GLOBALS['audit_debug'] = [];
+            $GLOBALS['audit_debug']['helper_called'] = true;
+            $GLOBALS['audit_debug']['action'] = 'CREATE';
+            $GLOBALS['audit_debug']['employee_unique_id'] = $employeeUniqueId;
+            $GLOBALS['audit_debug']['employee_name'] = $employeeName;
+            $GLOBALS['audit_debug']['company_id'] = (string)$companyId;
+            $GLOBALS['audit_debug']['timestamp'] = date('Y-m-d H:i:s');
+            $GLOBALS['audit_debug']['user_data'] = $auditUserData;
+            
+            // Log audit action with error handling
+            try {
             AuditHelper::logEmployeeAction(
                 'CREATE',
                 $employeeUniqueId,
@@ -294,6 +360,13 @@ class EmployeesController extends ApiController
                 $auditUserData,
                 $this->request
             );
+            } catch (\Exception $e) {
+                Log::error('Error logging employee CREATE audit: ' . $e->getMessage(), [
+                    'employee_unique_id' => $employeeUniqueId,
+                    'trace' => $e->getTraceAsString()
+                ]);
+                // Don't fail the request if audit logging fails
+            }
 
             return $this->response
                 ->withType('application/json')
@@ -303,6 +376,7 @@ class EmployeesController extends ApiController
                     'employee_id' => $employeeUniqueId,
                     'answer_id' => $answerEntity->id,
                     'user_id' => $userEntity->id,
+                    'debug' => $GLOBALS['audit_debug'] ?? null,
                 ]));
         } catch (Exception $e) {
             if (isset($connection) && $connection->inTransaction()) {
@@ -1901,7 +1975,8 @@ class EmployeesController extends ApiController
     }
 
     $companyId = $this->getCompanyId($authResult);
-    $connection = ConnectionManager::get('client_' . $companyId);
+    // Note: Connection is not used in this method, getTable handles connection selection
+    // Including test mode detection like getTable does
     $EmployeeTemplatesTable = $this->getTable('EmployeeTemplates', $companyId);
 
     $query = $EmployeeTemplatesTable
@@ -2361,7 +2436,90 @@ class EmployeesController extends ApiController
             }
 
             // Extract employee name for audit logging BEFORE deletion
-            $employeeName = AuditHelper::extractEmployeeName($employee->answers ?? []);
+            // Handle both JSON string and array formats
+            $employeeAnswers = $employee->answers ?? [];
+            if (is_string($employeeAnswers)) {
+                $employeeAnswers = json_decode($employeeAnswers, true) ?? [];
+            }
+            
+            // Try to get full name from template structure
+            $employeeName = 'Unknown Employee';
+            if (!empty($employee->template_id)) {
+                try {
+                    $EmployeeTemplatesTable = $this->getTable('EmployeeTemplates', $companyId);
+                    $template = $EmployeeTemplatesTable->find()
+                        ->where(['id' => $employee->template_id, 'deleted' => 0])
+                        ->first();
+                    
+                    if ($template && !empty($template->structure)) {
+                        $structure = is_string($template->structure) 
+                            ? json_decode($template->structure, true) 
+                            : $template->structure;
+                        
+                        // Build field map (field ID -> label)
+                        $fieldMap = [];
+                        if (is_array($structure)) {
+                            foreach ($structure as $group) {
+                                if (isset($group['fields']) && is_array($group['fields'])) {
+                                    foreach ($group['fields'] as $field) {
+                                        if (isset($field['id'])) {
+                                            $label = $field['customize_field_label'] ?? $field['label'] ?? '';
+                                            $fieldMap[$field['id']] = $label;
+                                        }
+                                    }
+                                }
+                                if (isset($group['subGroups']) && is_array($group['subGroups'])) {
+                                    foreach ($group['subGroups'] as $subGroup) {
+                                        if (isset($subGroup['fields']) && is_array($subGroup['fields'])) {
+                                            foreach ($subGroup['fields'] as $field) {
+                                                if (isset($field['id'])) {
+                                                    $label = $field['customize_field_label'] ?? $field['label'] ?? '';
+                                                    $fieldMap[$field['id']] = $label;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Extract first name and last name using field map
+                        $firstName = '';
+                        $lastName = '';
+                        if (is_array($employeeAnswers)) {
+                            foreach ($employeeAnswers as $groupId => $groupAnswers) {
+                                if (is_array($groupAnswers)) {
+                                    foreach ($groupAnswers as $fieldId => $value) {
+                                        $label = $fieldMap[$fieldId] ?? '';
+                                        if (in_array($label, ['First Name', 'Given Name'])) {
+                                            $firstName = $value ?? '';
+                                        } elseif (in_array($label, ['Last Name', 'Surname', 'Family Name'])) {
+                                            $lastName = $value ?? '';
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        $fullName = trim($firstName . ' ' . $lastName);
+                        if (!empty($fullName)) {
+                            $employeeName = $fullName;
+                        }
+                    }
+                } catch (\Exception $e) {
+                    Log::error('Error extracting employee name from template: ' . $e->getMessage());
+                }
+            }
+            
+            // Fallback to AuditHelper extraction if template method failed
+            if ($employeeName === 'Unknown Employee') {
+                $employeeName = AuditHelper::extractEmployeeName($employeeAnswers);
+            }
+            
+            // Final fallback to username if name extraction fails
+            if (empty($employeeName) || $employeeName === 'Unnamed Employee') {
+                $employeeName = $employee->username ?? $employeeUniqueId ?? 'Unknown Employee';
+            }
 
             // Soft delete related records
             $employeeTemplateAnswersTable->updateAll(
@@ -2401,7 +2559,62 @@ class EmployeesController extends ApiController
             // Extract user data for audit logging
             $auditUserData = AuditHelper::extractUserData($authResult);
             
-            // Log employee deletion
+            // Override company_id and username with the correct values from controller
+            $authData = $authResult->getData();
+            $username = null;
+            if ($authData instanceof \ArrayObject || is_array($authData)) {
+                $username = $authData['username'] ?? $authData['sub'] ?? null;
+            } elseif (is_object($authData)) {
+                $username = $authData->username ?? $authData->sub ?? null;
+            }
+            
+            $auditUserData['company_id'] = (string)$companyId;
+            $auditUserData['username'] = $username ?? $auditUserData['username'] ?? 'system';
+            $auditUserData['user_id'] = $authData->id ?? $authData['id'] ?? $authData->sub ?? $authData['sub'] ?? $auditUserData['user_id'] ?? 0;
+            
+            // If we now have a user_id but full_name wasn't fetched, fetch it now
+            if (!empty($auditUserData['user_id']) && (empty($auditUserData['full_name']) || $auditUserData['full_name'] === 'Unknown')) {
+                try {
+                    $usersTable = TableRegistry::getTableLocator()->get('Users', [
+                        'connection' => ConnectionManager::get('default')
+                    ]);
+                    
+                    $user = $usersTable->find()
+                        ->select(['first_name', 'last_name'])
+                        ->where(['id' => $auditUserData['user_id']])
+                        ->first();
+                    
+                    if ($user) {
+                        $firstName = $user->first_name ?? '';
+                        $lastName = $user->last_name ?? '';
+                        $fullName = trim($firstName . ' ' . $lastName);
+                        if (!empty($fullName)) {
+                            $auditUserData['full_name'] = $fullName;
+                            $auditUserData['employee_name'] = $fullName;
+                        }
+                    }
+                } catch (\Exception $e) {
+                    Log::error('Error fetching user full name in controller: ' . $e->getMessage());
+                }
+            }
+            
+            // Ensure full_name is preserved (don't overwrite it if it was already fetched)
+            if (empty($auditUserData['full_name']) && !empty($auditUserData['employee_name'])) {
+                $auditUserData['full_name'] = $auditUserData['employee_name'];
+            }
+            
+            // Initialize debug info
+            $GLOBALS['audit_debug'] = [];
+            $GLOBALS['audit_debug']['helper_called'] = true;
+            $GLOBALS['audit_debug']['action'] = 'DELETE';
+            $GLOBALS['audit_debug']['employee_unique_id'] = $employeeUniqueId;
+            $GLOBALS['audit_debug']['employee_name'] = $employeeName;
+            $GLOBALS['audit_debug']['company_id'] = (string)$companyId;
+            $GLOBALS['audit_debug']['timestamp'] = date('Y-m-d H:i:s');
+            $GLOBALS['audit_debug']['user_data'] = $auditUserData;
+            
+            // Log employee deletion with error handling
+            try {
             AuditHelper::logEmployeeAction(
                 'DELETE',
                 $employeeUniqueId,
@@ -2409,13 +2622,21 @@ class EmployeesController extends ApiController
                 $auditUserData,
                 $this->request
             );
+            } catch (\Exception $e) {
+                Log::error('Error logging employee DELETE audit: ' . $e->getMessage(), [
+                    'employee_unique_id' => $employeeUniqueId,
+                    'trace' => $e->getTraceAsString()
+                ]);
+                // Don't fail the request if audit logging fails
+            }
 
             return $this->response
                 ->withStatus(200)
                 ->withType('application/json')
                 ->withStringBody(json_encode([
                     'success' => true,
-                    'message' => 'Employee deleted successfully'
+                    'message' => 'Employee deleted successfully',
+                    'debug' => $GLOBALS['audit_debug'] ?? null,
                 ]));
         } catch (\Exception $e) {
             $connection->rollback();
@@ -2921,7 +3142,13 @@ class EmployeesController extends ApiController
             }
 
             // Store old answers BEFORE any modifications for audit logging
-            $oldAnswers = is_array($existingAnswer->answers) ? $existingAnswer->answers : (json_decode($existingAnswer->answers, true) ?? []);
+            if (is_array($existingAnswer->answers)) {
+                $oldAnswers = $existingAnswer->answers;
+            } elseif (is_string($existingAnswer->answers) && !empty($existingAnswer->answers)) {
+                $oldAnswers = json_decode($existingAnswer->answers, true) ?? [];
+            } else {
+                $oldAnswers = [];
+            }
             
             Log::debug('🔍 DEBUG: updateEmployee - Old answers from database (BEFORE update)', [
                 'existing_answers_raw' => $existingAnswer->answers,
@@ -2957,7 +3184,62 @@ class EmployeesController extends ApiController
 
             // Log audit action
             $userData = AuditHelper::extractUserData($authResult);
-            $employeeName = AuditHelper::extractEmployeeName($answerData);
+            
+            // Override company_id and username with the correct values from controller
+            $authData = $authResult->getData();
+            $username = null;
+            if ($authData instanceof \ArrayObject || is_array($authData)) {
+                $username = $authData['username'] ?? $authData['sub'] ?? null;
+            } elseif (is_object($authData)) {
+                $username = $authData->username ?? $authData->sub ?? null;
+            }
+            
+            $userData['company_id'] = (string)$companyId;
+            $userData['username'] = $username ?? $userData['username'] ?? 'system';
+            $userData['user_id'] = $authData->id ?? $authData['id'] ?? $authData->sub ?? $authData['sub'] ?? $userData['user_id'] ?? 0;
+            
+            // If we now have a user_id but full_name wasn't fetched, fetch it now
+            if (!empty($userData['user_id']) && (empty($userData['full_name']) || $userData['full_name'] === 'Unknown')) {
+                try {
+                    $usersTable = TableRegistry::getTableLocator()->get('Users', [
+                        'connection' => ConnectionManager::get('default')
+                    ]);
+                    
+                    $user = $usersTable->find()
+                        ->select(['first_name', 'last_name'])
+                        ->where(['id' => $userData['user_id']])
+                        ->first();
+                    
+                    if ($user) {
+                        $firstName = $user->first_name ?? '';
+                        $lastName = $user->last_name ?? '';
+                        $fullName = trim($firstName . ' ' . $lastName);
+                        if (!empty($fullName)) {
+                            $userData['full_name'] = $fullName;
+                            $userData['employee_name'] = $fullName;
+                        }
+                    }
+                } catch (\Exception $e) {
+                    Log::error('Error fetching user full name in controller: ' . $e->getMessage());
+                }
+            }
+            
+            // Ensure full_name is preserved (don't overwrite it if it was already fetched)
+            if (empty($userData['full_name']) && !empty($userData['employee_name'])) {
+                $userData['full_name'] = $userData['employee_name'];
+            }
+            
+            // Handle both JSON string and array formats
+            $employeeAnswers = $answerData;
+            if (is_string($employeeAnswers)) {
+                $employeeAnswers = json_decode($employeeAnswers, true) ?? [];
+            }
+            $employeeName = AuditHelper::extractEmployeeName($employeeAnswers);
+            
+            // Fallback to username if name extraction fails
+            if (empty($employeeName) || $employeeName === 'Unnamed Employee') {
+                $employeeName = $username ?? $employeeUniqueId ?? 'Unknown Employee';
+            }
             
             Log::debug('🔍 DEBUG: updateEmployee - Audit logging data', [
                 'employee_unique_id' => $employeeUniqueId,
@@ -3057,6 +3339,19 @@ class EmployeesController extends ApiController
                 ]);
             }
             
+            // Initialize debug info
+            $GLOBALS['audit_debug'] = [];
+            $GLOBALS['audit_debug']['helper_called'] = true;
+            $GLOBALS['audit_debug']['action'] = 'UPDATE';
+            $GLOBALS['audit_debug']['employee_unique_id'] = $employeeUniqueId;
+            $GLOBALS['audit_debug']['employee_name'] = $employeeName;
+            $GLOBALS['audit_debug']['company_id'] = (string)$companyId;
+            $GLOBALS['audit_debug']['timestamp'] = date('Y-m-d H:i:s');
+            $GLOBALS['audit_debug']['user_data'] = $userData;
+            $GLOBALS['audit_debug']['field_changes_count'] = count($fieldChanges);
+            
+            // Log audit action with error handling
+            try {
             AuditHelper::logEmployeeAction(
                 'UPDATE',
                 $employeeUniqueId,
@@ -3065,6 +3360,13 @@ class EmployeesController extends ApiController
                 $this->request,
                 $fieldChanges
             );
+            } catch (\Exception $e) {
+                Log::error('Error logging employee UPDATE audit: ' . $e->getMessage(), [
+                    'employee_unique_id' => $employeeUniqueId,
+                    'trace' => $e->getTraceAsString()
+                ]);
+                // Don't fail the request if audit logging fails
+            }
 
             return $this->response
                 ->withType('application/json')
@@ -3072,6 +3374,7 @@ class EmployeesController extends ApiController
                     'success' => true,
                     'message' => 'Employee data updated successfully. Please upload files if needed.',
                     'employee_id' => $employeeUniqueId,
+                    'debug' => $GLOBALS['audit_debug'] ?? null,
                     'answer_id' => $existingAnswer->id,
                     'user_id' => $userEntity->id,
                 ]));
@@ -3360,7 +3663,10 @@ class EmployeesController extends ApiController
 
     public function getEmployee()
     {
-        Configure::write('debug', 0); // Disable debug in production
+        // Only disable debug if not in CLI (test) mode
+        if (php_sapi_name() !== 'cli') {
+            Configure::write('debug', 0);
+        }
         $this->request->allowMethod(['post']);
 
         // Authentication check
@@ -3403,18 +3709,6 @@ class EmployeesController extends ApiController
                     'template_id' => 'EmployeeTemplateAnswers.template_id',
                     'answer_id' => 'EmployeeTemplateAnswers.id',
                     'answers' => 'EmployeeTemplateAnswers.answers',
-                    'structure' => 'EmployeeTemplates.structure',
-                ])
-                ->join([
-                    'EmployeeTemplates' => [
-                        'table' => $employeeTemplatesTable->getTable(),
-                        'type' => 'LEFT',
-                        'conditions' => [
-                            'EmployeeTemplates.company_id' => $companyId,
-                            'EmployeeTemplates.id = EmployeeTemplateAnswers.template_id',
-                            'EmployeeTemplates.deleted' => 0,
-                        ],
-                    ],
                 ])
                 ->where([
                     'EmployeeTemplateAnswers.company_id' => $companyId,
@@ -3422,6 +3716,19 @@ class EmployeesController extends ApiController
                     'EmployeeTemplateAnswers.employee_unique_id' => $employeeUniqueId,
                 ])
                 ->first();
+
+            // Fetch template separately to ensure structure is properly decoded
+            $template = null;
+            if ($employeeDetail && $employeeDetail->template_id) {
+                $template = $employeeTemplatesTable
+                    ->find()
+                    ->where([
+                        'EmployeeTemplates.company_id' => $companyId,
+                        'EmployeeTemplates.id' => $employeeDetail->template_id,
+                        'EmployeeTemplates.deleted' => 0,
+                    ])
+                    ->first();
+            }
 
             if (!$employeeDetail) {
                 return $this->response
@@ -3433,16 +3740,42 @@ class EmployeesController extends ApiController
                     ]));
             }
 
-            // Parse structure (JSON in database)
-            $structure = is_string($employeeDetail->structure)
-                ? json_decode($employeeDetail->structure, true)
-                : $employeeDetail->structure;
-            if (json_last_error() !== JSON_ERROR_NONE) {
-                throw new \Exception('Invalid structure JSON format');
+            if (!$template) {
+                return $this->response
+                    ->withStatus(404)
+                    ->withType('application/json')
+                    ->withStringBody(json_encode([
+                        'success' => false,
+                        'message' => 'Employee template not found. Please ensure the employee has an associated template.',
+                    ]));
             }
 
-            // Parse answers (array from JSONB)
-            $answers = is_array($employeeDetail->answers) ? $employeeDetail->answers : [];
+            // Parse structure (JSON in database)
+            // The structure should be automatically decoded by CakePHP if configured as JSON type
+            $structure = null;
+            if (is_string($template->structure)) {
+                $structure = json_decode($template->structure, true);
+                if (json_last_error() !== JSON_ERROR_NONE) {
+                    throw new \Exception('Invalid structure JSON format: ' . json_last_error_msg());
+                }
+            } elseif (is_array($template->structure)) {
+                $structure = $template->structure;
+            } else {
+                throw new \Exception('Structure is not a valid array or JSON string. Got type: ' . gettype($template->structure));
+            }
+            
+            if (!is_array($structure)) {
+                throw new \Exception('Structure must be an array after parsing. Got type: ' . gettype($structure));
+            }
+
+            // Parse answers (array from JSONB or JSON string)
+            if (is_array($employeeDetail->answers)) {
+                $answers = $employeeDetail->answers;
+            } elseif (is_string($employeeDetail->answers)) {
+                $answers = json_decode($employeeDetail->answers, true) ?? [];
+            } else {
+                $answers = [];
+            }
 
             $formattedData = [
                 'employee_unique_id' => $employeeDetail->employee_unique_id,
@@ -3452,10 +3785,20 @@ class EmployeesController extends ApiController
 
             // Map answers using group and field IDs
             foreach ($structure as $group) {
+                if (!is_array($group) || !isset($group['id'])) {
+                    continue; // Skip invalid groups
+                }
+                
                 $groupId = $group['id'];
-                $groupLabel = $group['customize_group_label'] ?? $group['label'];
-                if (isset($answers[$groupId])) {
+                $groupLabel = $group['customize_group_label'] ?? $group['label'] ?? '';
+                
+                // Process main group fields
+                if (isset($group['fields']) && is_array($group['fields']) && isset($answers[$groupId])) {
                     foreach ($group['fields'] as $field) {
+                        if (!is_array($field) || !isset($field['id']) || !isset($field['label'])) {
+                            continue; // Skip invalid fields
+                        }
+                        
                         $fieldId = $field['id'];
                         $fieldKey = $field['label'];
                         // Skip the password field
@@ -3468,12 +3811,22 @@ class EmployeesController extends ApiController
                         $formattedData[$normalizedKey] = $value;
                     }
                 }
-                if (!empty($group['subGroups'])) {
+                
+                // Process subgroups if they exist
+                if (!empty($group['subGroups']) && is_array($group['subGroups'])) {
                     foreach ($group['subGroups'] as $index => $subGroup) {
+                        if (!is_array($subGroup) || !isset($subGroup['id'])) {
+                            continue; // Skip invalid subgroups
+                        }
+                        
                         $subGroupId = $subGroup['id'];
                         $subGroupLabel = "{$groupLabel}_{$index}";
-                        if (isset($answers[$subGroupLabel])) {
+                        if (isset($answers[$subGroupLabel]) && isset($subGroup['fields']) && is_array($subGroup['fields'])) {
                             foreach ($subGroup['fields'] as $field) {
+                                if (!is_array($field) || !isset($field['id']) || !isset($field['label'])) {
+                                    continue; // Skip invalid fields
+                                }
+                                
                                 $fieldId = $field['id'];
                                 $fieldKey = $field['label'];
                                 // Skip the password field
@@ -3503,12 +3856,18 @@ class EmployeesController extends ApiController
                     'message' => 'Employee data retrieved successfully',
                 ]));
         } catch (\Throwable $e) {
+            // Include error message in debug mode or CLI (test) mode for better debugging
+            $isDebugMode = Configure::read('debug') || php_sapi_name() === 'cli';
+            Log::error('getEmployee error: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString()
+            ]);
             return $this->response
                 ->withStatus(500)
                 ->withType('application/json')
                 ->withStringBody(json_encode([
                     'success' => false,
                     'message' => 'Error fetching employee data',
+                    'error' => $isDebugMode ? $e->getMessage() : null,
                 ]));
         }
     }
@@ -4095,6 +4454,27 @@ class EmployeesController extends ApiController
                     $connectionName = 'orgtrakker_' . $orgtrakkerCompanyId;
                     $databaseName = 'orgtrakker_' . $orgtrakkerCompanyId;
                     
+                    // In test environment, use test database
+                    if (Configure::read('debug') && php_sapi_name() === 'cli') {
+                        // Try the alias first (used by fixtures), then the direct test connection
+                        $testConnectionAlias = 'test_orgtrakker_' . $orgtrakkerCompanyId;
+                        $directTestConnectionName = 'orgtrakker_' . $orgtrakkerCompanyId . '_test';
+                        $databaseName = 'orgtrakker_' . $orgtrakkerCompanyId . '_test';
+                        
+                        try {
+                            return ConnectionManager::get($testConnectionAlias);
+                        } catch (\Exception $e) {
+                            try {
+                                return ConnectionManager::get($directTestConnectionName);
+                            } catch (\Exception $e2) {
+                                throw new \Exception(
+                                    "Test Orgtrakker database connection '{$testConnectionAlias}' or '{$directTestConnectionName}' is not configured. " .
+                                    "Error: " . $e->getMessage() . " | " . $e2->getMessage()
+                                );
+                            }
+                        }
+                    }
+                    
                     try {
                         // Try to get existing connection
                         return ConnectionManager::get($connectionName);
@@ -4112,7 +4492,7 @@ class EmployeesController extends ApiController
                                 'database' => $databaseName,
                                 'encoding' => 'utf8',
                                 'timezone' => 'UTC',
-                                'cacheMetadata' => true,
+                                'cacheMetadata' => !(Configure::read('debug') && php_sapi_name() === 'cli'), // Disable caching in test mode
                                 'quoteIdentifiers' => false,
                                 'log' => false,
                             ]);
@@ -4142,6 +4522,23 @@ class EmployeesController extends ApiController
         }
         
         // Fallback to default orgtrakker connection (backward compatibility)
+        // In test environment, use test orgtrakker connection
+        if (Configure::read('debug') && php_sapi_name() === 'cli') {
+            // Try the alias first (used by fixtures), then the direct test connection
+            $testConnectionAlias = 'test_orgtrakker_100000';
+            $directTestConnectionName = 'orgtrakker_100000_test';
+            try {
+                return ConnectionManager::get($testConnectionAlias);
+            } catch (\Exception $e) {
+                try {
+                    return ConnectionManager::get($directTestConnectionName);
+                } catch (\Exception $e2) {
+                    Log::warning('Test orgtrakker connection not found, trying default', [
+                        'error' => $e->getMessage() . " | " . $e2->getMessage()
+                    ]);
+                }
+            }
+        }
         return ConnectionManager::get('orgtrakker_100000');
     }
 
@@ -4269,6 +4666,7 @@ class EmployeesController extends ApiController
     {
         $EmployeeTemplateAnswersTable = $this->getTable('EmployeeTemplateAnswers', $companyId);
         
+        // Check for non-deleted employees
         $existing = $EmployeeTemplateAnswersTable
             ->find()
             ->where([
@@ -4282,6 +4680,33 @@ class EmployeesController extends ApiController
             ->first();
         
         return $existing !== null;
+    }
+    
+    /**
+     * Check if employee exists (including soft-deleted) and return the entity
+     *
+     * @param string $companyId
+     * @param string $username
+     * @param string $employeeUniqueId
+     * @return \App\Model\Entity\EmployeeTemplateAnswer|null
+     */
+    private function findEmployeeIncludingDeleted($companyId, $username, $employeeUniqueId)
+    {
+        $EmployeeTemplateAnswersTable = $this->getTable('EmployeeTemplateAnswers', $companyId);
+        
+        // Check for any employee (including soft-deleted)
+        $existing = $EmployeeTemplateAnswersTable
+            ->find()
+            ->where([
+                'company_id' => $companyId,
+                'OR' => [
+                    'username' => $username,
+                    'employee_unique_id' => $employeeUniqueId,
+                ],
+            ])
+            ->first();
+        
+        return $existing;
     }
 
     /**
@@ -6009,19 +6434,39 @@ class EmployeesController extends ApiController
         $RoleLevelsTable = $this->getTable('RoleLevels', $companyId);
         $updatedCount = 0;
         
+        // Get existing role levels with full data for updates (including soft-deleted)
+        $existingRoleLevels = $RoleLevelsTable->find()
+            ->select(['id', 'level_unique_id', 'name', 'rank', 'custom_fields', 'template_id', 'deleted', 'created_by'])
+                ->where([
+                    'company_id' => $companyId,
+            ])
+            ->toArray();
+        
+        $existingRoleLevelsMap = [];
+        $softDeletedRoleLevelsMap = [];
+        foreach ($existingRoleLevels as $rl) {
+            $key = $rl->level_unique_id ?? '';
+            if (!empty($key)) {
+                if ($rl->deleted) {
+                    // Store soft-deleted role levels separately
+                    $softDeletedRoleLevelsMap[$key] = $rl;
+                } else {
+                    // Store non-deleted role levels
+                    $existingRoleLevelsMap[$key] = $rl;
+                }
+            }
+        }
+        
         foreach ($orgtrakkerRoleLevels as $roleLevel) {
             $levelUniqueId = $roleLevel['level_unique_id'];
             
-            // Check if already exists
-            $existing = $RoleLevelsTable->find()
-                ->where([
-                    'company_id' => $companyId,
-                    'level_unique_id' => $levelUniqueId,
-                    'deleted' => false,
-                ])
-                ->first();
-            
+            // Check if already exists (non-deleted)
+            $existing = $existingRoleLevelsMap[$levelUniqueId] ?? null;
             $isUpdate = $existing !== null;
+            
+            // Check if soft-deleted role level exists
+            $softDeletedRoleLevel = $softDeletedRoleLevelsMap[$levelUniqueId] ?? null;
+            $isRestore = $softDeletedRoleLevel !== null && $softDeletedRoleLevel->deleted;
             
             // Map custom_fields - always create structure based on scorecardtrakker template
             $customFields = [];
@@ -6056,7 +6501,7 @@ class EmployeesController extends ApiController
                 $customFields = $this->mapFieldValuesByLabel([], [], $scorecardtrakkerTemplateStructure, $levelUniqueId);
             }
             
-            // Create or update role level
+            // Create, update, or restore role level
             if ($isUpdate) {
                 // Update existing role level
                 $existing->name = $roleLevel['name'];
@@ -6065,6 +6510,17 @@ class EmployeesController extends ApiController
                 $existing->modified = date('Y-m-d H:i:s');
                 if ($RoleLevelsTable->save($existing)) {
                     $updatedCount++;
+                }
+            } elseif ($isRestore) {
+                // Restore soft-deleted role level
+                $softDeletedRoleLevel->deleted = false;
+                $softDeletedRoleLevel->name = $roleLevel['name'];
+                $softDeletedRoleLevel->rank = $roleLevel['rank'];
+                $softDeletedRoleLevel->custom_fields = $customFields;
+                $softDeletedRoleLevel->template_id = $scorecardtrakkerTemplate->id;
+                $softDeletedRoleLevel->modified = date('Y-m-d H:i:s');
+                if ($RoleLevelsTable->save($softDeletedRoleLevel)) {
+                    $importedCount++;
                 }
             } else {
                 // Import new role level
@@ -6132,17 +6588,38 @@ class EmployeesController extends ApiController
         $JobRoleTemplateAnswersTable = $this->getTable('JobRoleTemplateAnswers', $companyId);
         $updatedCount = 0;
         
+        // Get existing job roles with full data for updates (including soft-deleted)
+        $existingJobRoles = $JobRoleTemplateAnswersTable->find()
+            ->select(['id', 'job_role_unique_id', 'answers', 'template_id', 'deleted'])
+                ->where([
+                    'company_id' => $companyId,
+            ])
+            ->toArray();
+        
+        $existingJobRolesMap = [];
+        $softDeletedJobRolesMap = [];
+        foreach ($existingJobRoles as $jr) {
+            $key = $jr->job_role_unique_id ?? '';
+            if (!empty($key)) {
+                if ($jr->deleted) {
+                    // Store soft-deleted job roles separately
+                    $softDeletedJobRolesMap[$key] = $jr;
+                } else {
+                    // Store non-deleted job roles
+                    $existingJobRolesMap[$key] = $jr;
+                }
+            }
+        }
+        
         foreach ($orgtrakkerJobRoles as $jobRole) {
             $jobRoleUniqueId = $jobRole['job_role_unique_id'];
             
-            // Check if already exists
-            $existing = $JobRoleTemplateAnswersTable->find()
-                ->where([
-                    'company_id' => $companyId,
-                    'job_role_unique_id' => $jobRoleUniqueId,
-                    'deleted' => false,
-                ])
-                ->first();
+            // Check if already exists (non-deleted)
+            $existing = $existingJobRolesMap[$jobRoleUniqueId] ?? null;
+            
+            // Check if soft-deleted job role exists
+            $softDeletedJobRole = $softDeletedJobRolesMap[$jobRoleUniqueId] ?? null;
+            $isRestore = $softDeletedJobRole !== null && $softDeletedJobRole->deleted;
             
             // Map answers
             $orgtrakkerAnswers = json_decode($jobRole['answers'], true);
@@ -6154,6 +6631,15 @@ class EmployeesController extends ApiController
                 $existing->modified = date('Y-m-d H:i:s');
                 if ($JobRoleTemplateAnswersTable->save($existing)) {
                     $updatedCount++;
+                }
+            } elseif ($isRestore) {
+                // Restore soft-deleted job role
+                $softDeletedJobRole->deleted = false;
+                $softDeletedJobRole->answers = $mappedAnswers;
+                $softDeletedJobRole->template_id = $scorecardtrakkerTemplate->id;
+                $softDeletedJobRole->modified = date('Y-m-d H:i:s');
+                if ($JobRoleTemplateAnswersTable->save($softDeletedJobRole)) {
+                    $importedCount++;
                 }
             } else {
                 // Import new job role
@@ -6314,21 +6800,27 @@ class EmployeesController extends ApiController
         $orgtrakkerTemplate = $orgtrakkerTemplateStmt->fetch('assoc');
         $orgtrakkerTemplateStructure = $orgtrakkerTemplate ? json_decode($orgtrakkerTemplate['structure'], true) : [];
         
-        // Get existing employees with full data for updates
+        // Get existing employees with full data for updates (including soft-deleted)
         $EmployeeTemplateAnswersTable = $this->getTable('EmployeeTemplateAnswers', $companyId);
         $existingEmployees = $EmployeeTemplateAnswersTable->find()
-            ->select(['id', 'username', 'employee_unique_id', 'answers'])
+            ->select(['id', 'username', 'employee_unique_id', 'answers', 'deleted', 'employee_id', 'template_id', 'created_by'])
             ->where([
                 'company_id' => $companyId,
-                'deleted' => false,
             ])
             ->toArray();
         
         $existingEmployeesMap = [];
+        $softDeletedEmployeesMap = [];
         foreach ($existingEmployees as $emp) {
             $key = $emp->employee_unique_id ?? $emp->username ?? '';
             if (!empty($key)) {
-                $existingEmployeesMap[$key] = $emp;
+                if ($emp->deleted) {
+                    // Store soft-deleted employees separately
+                    $softDeletedEmployeesMap[$key] = $emp;
+                } else {
+                    // Store non-deleted employees
+                    $existingEmployeesMap[$key] = $emp;
+                }
             }
         }
         
@@ -6355,9 +6847,13 @@ class EmployeesController extends ApiController
             $username = $employee['username'] ?? '';
             $employeeUniqueId = $employee['employee_unique_id'] ?? '';
             
-            // Check if already exists
+            // Check if already exists (non-deleted)
             $existingEmployee = $existingEmployeesMap[$employeeUniqueId] ?? $existingEmployeesMap[$username] ?? null;
             $isUpdate = $existingEmployee !== null;
+            
+            // Check if soft-deleted employee exists
+            $softDeletedEmployee = $softDeletedEmployeesMap[$employeeUniqueId] ?? $softDeletedEmployeesMap[$username] ?? null;
+            $isRestore = $softDeletedEmployee !== null && $softDeletedEmployee->deleted;
             
             // Map answers
             $orgtrakkerAnswers = json_decode($employee['answers'], true);
@@ -6488,8 +6984,23 @@ class EmployeesController extends ApiController
                 }
             }
             
-            // Create or update employee
-            if ($isUpdate) {
+            // Create, update, or restore employee
+            if ($isRestore) {
+                // Restore soft-deleted employee
+                $entity = $EmployeeTemplateAnswersTable->get($softDeletedEmployee->id);
+                $entity->deleted = false;
+                $entity->answers = $mappedAnswers;
+                $entity->employee_id = $employee['employee_id'] ?? $entity->employee_id;
+                $entity->username = $username;
+                $entity->template_id = $scorecardtrakkerTemplate->id;
+                $entity->report_to_employee_unique_id = $reportToEmployeeUniqueId ?: null;
+                $entity->created_by = $createdBy;
+                $entity->modified = date('Y-m-d H:i:s');
+                
+                if ($EmployeeTemplateAnswersTable->save($entity)) {
+                    $importedCount++;
+                }
+            } elseif ($isUpdate) {
                 // Update existing employee
                 $entity = $EmployeeTemplateAnswersTable->get($existingEmployee->id);
                 $entity->answers = $mappedAnswers;
@@ -6827,7 +7338,7 @@ class EmployeesController extends ApiController
             foreach ($employeeUniqueIds as $employeeUniqueId) {
                 try {
                     // Fetch employee from orgtrakker
-                    $orgtrakkerEmployee = $this->getOrgtrakkerEmployee($employeeUniqueId, $companyId);
+                    $orgtrakkerEmployee = $this->getOrgtrakkerEmployee($employeeUniqueId, (string)$companyId);
                     
                     if (!$orgtrakkerEmployee) {
                         $failedEmployees[] = [
@@ -6840,7 +7351,7 @@ class EmployeesController extends ApiController
                     $username = $orgtrakkerEmployee['username'] ?? '';
                     $employeeId = $orgtrakkerEmployee['employee_id'] ?? '';
                     
-                    // Check if already imported
+                    // Check if already imported (non-deleted)
                     if ($this->checkEmployeeAlreadyImported($companyId, $username, $employeeUniqueId)) {
                         $failedEmployees[] = [
                             'employee_unique_id' => $employeeUniqueId,
@@ -6850,40 +7361,50 @@ class EmployeesController extends ApiController
                         continue;
                     }
                     
+                    // Check if soft-deleted employee exists
+                    $softDeletedEmployee = $this->findEmployeeIncludingDeleted($companyId, $username, $employeeUniqueId);
+                    
                     // Start transaction for this employee
                     $connection->begin();
                     
                     try {
-                        // Create employee record
-                        $answerEntity = $EmployeeTemplateAnswersTable->newEntity([
-                            'company_id' => $companyId,
-                            'employee_unique_id' => $employeeUniqueId,
-                            'employee_id' => $employeeId,
-                            'username' => $username,
-                            'template_id' => $template->id,
-                            'answers' => $emptyAnswers,
-                            'report_to_employee_unique_id' => null,
-                            'created_by' => $createdBy,
-                            'created' => date('Y-m-d H:i:s'),
-                            'modified' => date('Y-m-d H:i:s'),
-                            'deleted' => false,
-                        ]);
-                        
-                        if (!$EmployeeTemplateAnswersTable->save($answerEntity)) {
-                            throw new Exception('Failed to save employee record');
+                        if ($softDeletedEmployee && $softDeletedEmployee->deleted) {
+                            // Restore soft-deleted employee
+                            $softDeletedEmployee->deleted = false;
+                            $softDeletedEmployee->employee_id = $employeeId;
+                            $softDeletedEmployee->username = $username;
+                            $softDeletedEmployee->template_id = $template->id;
+                            $softDeletedEmployee->answers = $emptyAnswers;
+                            $softDeletedEmployee->report_to_employee_unique_id = null;
+                            $softDeletedEmployee->created_by = $createdBy;
+                            $softDeletedEmployee->modified = date('Y-m-d H:i:s');
+                            
+                            if (!$EmployeeTemplateAnswersTable->save($softDeletedEmployee)) {
+                                throw new Exception('Failed to restore employee record');
+                            }
+                        } else {
+                            // Create new employee record
+                            $answerEntity = $EmployeeTemplateAnswersTable->newEntity([
+                                'company_id' => $companyId,
+                                'employee_unique_id' => $employeeUniqueId,
+                                'employee_id' => $employeeId,
+                                'username' => $username,
+                                'template_id' => $template->id,
+                                'answers' => $emptyAnswers,
+                                'report_to_employee_unique_id' => null,
+                                'created_by' => $createdBy,
+                                'created' => date('Y-m-d H:i:s'),
+                                'modified' => date('Y-m-d H:i:s'),
+                                'deleted' => false,
+                            ]);
+                            
+                            if (!$EmployeeTemplateAnswersTable->save($answerEntity)) {
+                                throw new Exception('Failed to save employee record');
+                            }
                         }
                         
                         $connection->commit();
                         $importedCount++;
-                        
-                        // Log audit action
-                        AuditHelper::logEmployeeAction(
-                            'IMPORT',
-                            $employeeUniqueId,
-                            $username,
-                            AuditHelper::extractUserData($authResult),
-                            $this->request
-                        );
                         
                     } catch (\Exception $e) {
                         $connection->rollback();
@@ -6902,6 +7423,129 @@ class EmployeesController extends ApiController
                 }
             }
             
+            // Log bulk import action
+            if ($importedCount > 0) {
+                $auditUserData = AuditHelper::extractUserData($authResult);
+                
+                // Override company_id and username with the correct values from controller
+                $authData = $authResult->getData();
+                $auditUsername = null;
+                if ($authData instanceof \ArrayObject || is_array($authData)) {
+                    $auditUsername = $authData['username'] ?? $authData['sub'] ?? null;
+                } elseif (is_object($authData)) {
+                    $auditUsername = $authData->username ?? $authData->sub ?? null;
+                }
+                
+                $auditUserData['company_id'] = (string)$companyId;
+                $auditUserData['username'] = $auditUsername ?? $auditUserData['username'] ?? 'system';
+                $auditUserData['user_id'] = $authData->id ?? $authData['id'] ?? $authData->sub ?? $authData['sub'] ?? $auditUserData['user_id'] ?? 0;
+                
+                // If we now have a user_id but full_name wasn't fetched, fetch it now
+                if (!empty($auditUserData['user_id']) && (empty($auditUserData['full_name']) || $auditUserData['full_name'] === 'Unknown')) {
+                    try {
+                        $usersTable = TableRegistry::getTableLocator()->get('Users', [
+                            'connection' => ConnectionManager::get('default')
+                        ]);
+                        
+                        $user = $usersTable->find()
+                            ->select(['first_name', 'last_name'])
+                            ->where(['id' => $auditUserData['user_id']])
+                            ->first();
+                        
+                        if ($user) {
+                            $firstName = $user->first_name ?? '';
+                            $lastName = $user->last_name ?? '';
+                            $fullName = trim($firstName . ' ' . $lastName);
+                            if (!empty($fullName)) {
+                                $auditUserData['full_name'] = $fullName;
+                                $auditUserData['employee_name'] = $fullName;
+                            }
+                        }
+                    } catch (\Exception $e) {
+                        Log::error('Error fetching user full name in controller: ' . $e->getMessage());
+                    }
+                }
+                
+                // Ensure full_name is preserved (don't overwrite it if it was already fetched)
+                if (empty($auditUserData['full_name']) && !empty($auditUserData['employee_name'])) {
+                    $auditUserData['full_name'] = $auditUserData['employee_name'];
+                }
+                
+                // Try to log audit action, but don't fail the import if it fails
+                $auditDebug = [];
+                $auditDebug['audit_service_created'] = false;
+                $auditDebug['audit_log_attempted'] = false;
+                $auditDebug['audit_log_success'] = false;
+                $auditDebug['audit_log_error'] = null;
+                $auditDebug['audit_log_id'] = null;
+                $auditDebug['company_id'] = (string)$companyId;
+                $auditDebug['company_id_type'] = gettype($companyId);
+                
+                try {
+                    // Ensure companyId is a valid string (handle null, int, etc.)
+                    if ($companyId === null || $companyId === '') {
+                        $auditCompanyId = 'default';
+                    } else {
+                        $auditCompanyId = (string)$companyId;
+                    }
+                    $auditDebug['audit_company_id_used'] = $auditCompanyId;
+                    $auditService = new \App\Service\AuditService($auditCompanyId);
+                    $auditDebug['audit_service_created'] = true;
+                } catch (\Throwable $e) {
+                    // Log error creating audit service but don't fail the import
+                    $auditDebug['audit_service_error'] = $e->getMessage();
+                    $auditDebug['audit_service_error_file'] = $e->getFile();
+                    $auditDebug['audit_service_error_line'] = $e->getLine();
+                    $auditDebug['audit_service_error_trace'] = substr($e->getTraceAsString(), 0, 2000); // Limit trace length
+                    Log::error('Error creating AuditService for bulk import audit: ' . $e->getMessage(), [
+                        'trace' => $e->getTraceAsString(),
+                        'file' => $e->getFile(),
+                        'line' => $e->getLine(),
+                        'company_id' => $companyId,
+                        'company_id_type' => gettype($companyId)
+                    ]);
+                    $auditService = null;
+                }
+                
+                if ($auditService !== null && $importedCount > 0) {
+                    $auditDebug['audit_log_attempted'] = true;
+                    $auditDebug['imported_count'] = $importedCount;
+                    try {
+                        $result = $auditService->logBulkImportAction(
+                            'employee',
+                            $importedCount,
+                            $auditUserData,
+                            $this->request->getParsedBody() ?? [],
+                            ['imported_count' => $importedCount, 'failed_count' => count($failedEmployees)]
+                        );
+                        
+                        if ($result !== null) {
+                            $auditDebug['audit_log_success'] = true;
+                            $auditDebug['audit_log_id'] = $result->id;
+                        } else {
+                            $auditDebug['audit_log_success'] = false;
+                            $auditDebug['audit_log_error'] = 'logBulkImportAction returned null';
+                        }
+                    } catch (\Throwable $e) {
+                        // Log audit error but don't fail the import
+                        $auditDebug['audit_log_error'] = $e->getMessage();
+                        $auditDebug['audit_log_error_file'] = $e->getFile();
+                        $auditDebug['audit_log_error_line'] = $e->getLine();
+                        Log::error('Error logging bulk import audit: ' . $e->getMessage(), [
+                            'trace' => $e->getTraceAsString(),
+                            'file' => $e->getFile(),
+                            'line' => $e->getLine()
+                        ]);
+                    }
+                } else {
+                    $auditDebug['skip_reason'] = $auditService === null ? 'audit_service_is_null' : 'imported_count_is_zero';
+                    $auditDebug['imported_count'] = $importedCount;
+                }
+            } else {
+                $auditDebug['skip_reason'] = 'imported_count_is_zero';
+                $auditDebug['imported_count'] = $importedCount;
+            }
+            
             $message = "Successfully imported {$importedCount} employee(s)";
             if (!empty($failedEmployees)) {
                 $message .= ". " . count($failedEmployees) . " employee(s) failed to import.";
@@ -6915,6 +7559,7 @@ class EmployeesController extends ApiController
                     'imported_count' => $importedCount,
                     'failed_count' => count($failedEmployees),
                     'failed_employees' => $failedEmployees,
+                    'debug' => $auditDebug ?? null,
                 ]));
                 
         } catch (\Exception $e) {
@@ -7000,34 +7645,301 @@ class EmployeesController extends ApiController
                 // Commit transaction
                 $connection->commit();
                 
-                // Log audit action for each newly imported employee (not updated ones)
-                if ($employeesImported > 0) {
-                    $importedEmployees = $EmployeeTemplateAnswersTable->find()
-                        ->select(['employee_unique_id', 'username'])
-                        ->where([
-                            'company_id' => $companyId,
-                            'deleted' => false,
-                        ])
-                        ->order(['created' => 'DESC'])
-                        ->limit($employeesImported)
-                        ->toArray();
-                    
-                    foreach ($importedEmployees as $emp) {
-                        AuditHelper::logEmployeeAction(
-                            'IMPORT',
-                            $emp->employee_unique_id,
-                            $emp->username ?? '',
-                            AuditHelper::extractUserData($authResult),
-                            $this->request
-                        );
+                // Log bulk import actions
+                $auditUserData = AuditHelper::extractUserData($authResult);
+                
+                // Override company_id and username with the correct values from controller
+                $authData = $authResult->getData();
+                $auditUsername = null;
+                if ($authData instanceof \ArrayObject || is_array($authData)) {
+                    $auditUsername = $authData['username'] ?? $authData['sub'] ?? null;
+                } elseif (is_object($authData)) {
+                    $auditUsername = $authData->username ?? $authData->sub ?? null;
+                }
+                
+                $auditUserData['company_id'] = (string)$companyId;
+                $auditUserData['username'] = $auditUsername ?? $auditUserData['username'] ?? 'system';
+                $auditUserData['user_id'] = $authData->id ?? $authData['id'] ?? $authData->sub ?? $authData['sub'] ?? $auditUserData['user_id'] ?? 0;
+                
+                // If we now have a user_id but full_name wasn't fetched, fetch it now
+                if (!empty($auditUserData['user_id']) && (empty($auditUserData['full_name']) || $auditUserData['full_name'] === 'Unknown')) {
+                    try {
+                        $usersTable = TableRegistry::getTableLocator()->get('Users', [
+                            'connection' => ConnectionManager::get('default')
+                        ]);
+                        
+                        $user = $usersTable->find()
+                            ->select(['first_name', 'last_name'])
+                            ->where(['id' => $auditUserData['user_id']])
+                            ->first();
+                        
+                        if ($user) {
+                            $firstName = $user->first_name ?? '';
+                            $lastName = $user->last_name ?? '';
+                            $fullName = trim($firstName . ' ' . $lastName);
+                            if (!empty($fullName)) {
+                                $auditUserData['full_name'] = $fullName;
+                                $auditUserData['employee_name'] = $fullName;
+                            }
+                        }
+                    } catch (\Exception $e) {
+                        Log::error('Error fetching user full name in controller: ' . $e->getMessage());
                     }
                 }
                 
+                // Ensure full_name is preserved (don't overwrite it if it was already fetched)
+                if (empty($auditUserData['full_name']) && !empty($auditUserData['employee_name'])) {
+                    $auditUserData['full_name'] = $auditUserData['employee_name'];
+                }
+                
+                // Try to create audit service, but don't fail the import if it fails
+                $auditDebug = [];
+                $auditDebug['audit_service_created'] = false;
+                $auditDebug['role_levels'] = [
+                    'audit_log_attempted' => false,
+                    'audit_log_success' => false,
+                    'audit_log_error' => null,
+                    'audit_log_id' => null,
+                ];
+                $auditDebug['job_roles'] = [
+                    'audit_log_attempted' => false,
+                    'audit_log_success' => false,
+                    'audit_log_error' => null,
+                    'audit_log_id' => null,
+                ];
+                $auditDebug['job_role_relationships'] = [
+                    'audit_log_attempted' => false,
+                    'audit_log_success' => false,
+                    'audit_log_error' => null,
+                    'audit_log_id' => null,
+                ];
+                $auditDebug['employees'] = [
+                    'audit_log_attempted' => false,
+                    'audit_log_success' => false,
+                    'audit_log_error' => null,
+                    'audit_log_id' => null,
+                ];
+                $auditDebug['employee_relationships'] = [
+                    'audit_log_attempted' => false,
+                    'audit_log_success' => false,
+                    'audit_log_error' => null,
+                    'audit_log_id' => null,
+                ];
+                $auditDebug['company_id'] = (string)$companyId;
+                $auditDebug['company_id_type'] = gettype($companyId);
+                
+                try {
+                    // Ensure companyId is a valid string (handle null, int, etc.)
+                    if ($companyId === null || $companyId === '') {
+                        $auditCompanyId = 'default';
+                    } else {
+                        $auditCompanyId = (string)$companyId;
+                    }
+                    $auditDebug['audit_company_id_used'] = $auditCompanyId;
+                    $auditService = new \App\Service\AuditService($auditCompanyId);
+                    $auditDebug['audit_service_created'] = true;
+                } catch (\Throwable $e) {
+                    // Log error creating audit service but don't fail the import
+                    $auditDebug['audit_service_error'] = $e->getMessage();
+                    $auditDebug['audit_service_error_file'] = $e->getFile();
+                    $auditDebug['audit_service_error_line'] = $e->getLine();
+                    $auditDebug['audit_service_error_trace'] = substr($e->getTraceAsString(), 0, 2000); // Limit trace length
+                    Log::error('Error creating AuditService for bulk import audit: ' . $e->getMessage(), [
+                        'trace' => $e->getTraceAsString(),
+                        'file' => $e->getFile(),
+                        'line' => $e->getLine(),
+                        'company_id' => $companyId,
+                        'company_id_type' => gettype($companyId)
+                    ]);
+                    $auditService = null;
+                }
+                
+                // Log bulk import for role levels
+                if ($auditService !== null && $roleLevelsImported > 0) {
+                    $auditDebug['role_levels']['audit_log_attempted'] = true;
+                    $auditDebug['role_levels']['imported_count'] = $roleLevelsImported;
+                    try {
+                        $result = $auditService->logBulkImportAction(
+                            'role_level',
+                            $roleLevelsImported,
+                            $auditUserData,
+                            $this->request->getParsedBody() ?? [],
+                            ['imported_count' => $roleLevelsImported, 'updated_count' => $roleLevelsUpdated]
+                        );
+                        
+                        if ($result !== null) {
+                            $auditDebug['role_levels']['audit_log_success'] = true;
+                            $auditDebug['role_levels']['audit_log_id'] = $result->id;
+                        } else {
+                            $auditDebug['role_levels']['audit_log_success'] = false;
+                            $auditDebug['role_levels']['audit_log_error'] = 'logBulkImportAction returned null';
+                        }
+                    } catch (\Throwable $e) {
+                        // Log audit error but don't fail the import
+                        $auditDebug['role_levels']['audit_log_error'] = $e->getMessage();
+                        $auditDebug['role_levels']['audit_log_error_file'] = $e->getFile();
+                        $auditDebug['role_levels']['audit_log_error_line'] = $e->getLine();
+                        Log::error('Error logging bulk import audit for role levels: ' . $e->getMessage(), [
+                            'trace' => $e->getTraceAsString(),
+                            'file' => $e->getFile(),
+                            'line' => $e->getLine()
+                        ]);
+                    }
+                } else {
+                    $auditDebug['role_levels']['skip_reason'] = $auditService === null ? 'audit_service_is_null' : 'role_levels_imported_is_zero';
+                    $auditDebug['role_levels']['imported_count'] = $roleLevelsImported;
+                }
+                
+                // Log bulk import for employees
+                if ($auditService !== null && $employeesImported > 0) {
+                    $auditDebug['employees']['audit_log_attempted'] = true;
+                    $auditDebug['employees']['imported_count'] = $employeesImported;
+                    try {
+                        $result = $auditService->logBulkImportAction(
+                            'employee',
+                            $employeesImported,
+                            $auditUserData,
+                            $this->request->getParsedBody() ?? [],
+                            ['imported_count' => $employeesImported, 'updated_count' => $employeesUpdated]
+                        );
+                        
+                        if ($result !== null) {
+                            $auditDebug['employees']['audit_log_success'] = true;
+                            $auditDebug['employees']['audit_log_id'] = $result->id;
+                        } else {
+                            $auditDebug['employees']['audit_log_success'] = false;
+                            $auditDebug['employees']['audit_log_error'] = 'logBulkImportAction returned null';
+                        }
+                    } catch (\Throwable $e) {
+                        // Log audit error but don't fail the import
+                        $auditDebug['employees']['audit_log_error'] = $e->getMessage();
+                        $auditDebug['employees']['audit_log_error_file'] = $e->getFile();
+                        $auditDebug['employees']['audit_log_error_line'] = $e->getLine();
+                        Log::error('Error logging bulk import audit for employees: ' . $e->getMessage(), [
+                            'trace' => $e->getTraceAsString(),
+                            'file' => $e->getFile(),
+                            'line' => $e->getLine()
+                        ]);
+                    }
+                } else {
+                    $auditDebug['employees']['skip_reason'] = $auditService === null ? 'audit_service_is_null' : 'employees_imported_is_zero';
+                    $auditDebug['employees']['imported_count'] = $employeesImported;
+                }
+                
+                // Log bulk import for job roles
+                if ($auditService !== null && $jobRolesImported > 0) {
+                    $auditDebug['job_roles']['audit_log_attempted'] = true;
+                    $auditDebug['job_roles']['imported_count'] = $jobRolesImported;
+                    try {
+                        $result = $auditService->logBulkImportAction(
+                            'job_role',
+                            $jobRolesImported,
+                            $auditUserData,
+                            $this->request->getParsedBody() ?? [],
+                            ['imported_count' => $jobRolesImported, 'updated_count' => $jobRolesUpdated]
+                        );
+                        
+                        if ($result !== null) {
+                            $auditDebug['job_roles']['audit_log_success'] = true;
+                            $auditDebug['job_roles']['audit_log_id'] = $result->id;
+                        } else {
+                            $auditDebug['job_roles']['audit_log_success'] = false;
+                            $auditDebug['job_roles']['audit_log_error'] = 'logBulkImportAction returned null';
+                        }
+                    } catch (\Throwable $e) {
+                        // Log audit error but don't fail the import
+                        $auditDebug['job_roles']['audit_log_error'] = $e->getMessage();
+                        $auditDebug['job_roles']['audit_log_error_file'] = $e->getFile();
+                        $auditDebug['job_roles']['audit_log_error_line'] = $e->getLine();
+                        Log::error('Error logging bulk import audit for job roles: ' . $e->getMessage(), [
+                            'trace' => $e->getTraceAsString(),
+                            'file' => $e->getFile(),
+                            'line' => $e->getLine()
+                        ]);
+                    }
+                } else {
+                    $auditDebug['job_roles']['skip_reason'] = $auditService === null ? 'audit_service_is_null' : 'job_roles_imported_is_zero';
+                    $auditDebug['job_roles']['imported_count'] = $jobRolesImported;
+                }
+                
+                // Log bulk import for job role relationships
+                if ($auditService !== null && $jobRoleRelationshipsImported > 0) {
+                    $auditDebug['job_role_relationships']['audit_log_attempted'] = true;
+                    $auditDebug['job_role_relationships']['imported_count'] = $jobRoleRelationshipsImported;
+                    try {
+                        $result = $auditService->logBulkImportAction(
+                            'job_role_relationship',
+                            $jobRoleRelationshipsImported,
+                            $auditUserData,
+                            $this->request->getParsedBody() ?? [],
+                            ['imported_count' => $jobRoleRelationshipsImported, 'updated_count' => $jobRoleRelationshipsUpdated]
+                        );
+                        
+                        if ($result !== null) {
+                            $auditDebug['job_role_relationships']['audit_log_success'] = true;
+                            $auditDebug['job_role_relationships']['audit_log_id'] = $result->id;
+                        } else {
+                            $auditDebug['job_role_relationships']['audit_log_success'] = false;
+                            $auditDebug['job_role_relationships']['audit_log_error'] = 'logBulkImportAction returned null';
+                        }
+                    } catch (\Throwable $e) {
+                        // Log audit error but don't fail the import
+                        $auditDebug['job_role_relationships']['audit_log_error'] = $e->getMessage();
+                        $auditDebug['job_role_relationships']['audit_log_error_file'] = $e->getFile();
+                        $auditDebug['job_role_relationships']['audit_log_error_line'] = $e->getLine();
+                        Log::error('Error logging bulk import audit for job role relationships: ' . $e->getMessage(), [
+                            'trace' => $e->getTraceAsString(),
+                            'file' => $e->getFile(),
+                            'line' => $e->getLine()
+                        ]);
+                    }
+                } else {
+                    $auditDebug['job_role_relationships']['skip_reason'] = $auditService === null ? 'audit_service_is_null' : 'job_role_relationships_imported_is_zero';
+                    $auditDebug['job_role_relationships']['imported_count'] = $jobRoleRelationshipsImported;
+                }
+                
+                // Log bulk import for employee relationships
+                if ($auditService !== null && $employeeRelationshipsImported > 0) {
+                    $auditDebug['employee_relationships']['audit_log_attempted'] = true;
+                    $auditDebug['employee_relationships']['imported_count'] = $employeeRelationshipsImported;
+                    try {
+                        $result = $auditService->logBulkImportAction(
+                            'employee_relationship',
+                            $employeeRelationshipsImported,
+                            $auditUserData,
+                            $this->request->getParsedBody() ?? [],
+                            ['imported_count' => $employeeRelationshipsImported, 'updated_count' => $employeeRelationshipsUpdated]
+                        );
+                        
+                        if ($result !== null) {
+                            $auditDebug['employee_relationships']['audit_log_success'] = true;
+                            $auditDebug['employee_relationships']['audit_log_id'] = $result->id;
+                        } else {
+                            $auditDebug['employee_relationships']['audit_log_success'] = false;
+                            $auditDebug['employee_relationships']['audit_log_error'] = 'logBulkImportAction returned null';
+                        }
+                    } catch (\Throwable $e) {
+                        // Log audit error but don't fail the import
+                        $auditDebug['employee_relationships']['audit_log_error'] = $e->getMessage();
+                        $auditDebug['employee_relationships']['audit_log_error_file'] = $e->getFile();
+                        $auditDebug['employee_relationships']['audit_log_error_line'] = $e->getLine();
+                        Log::error('Error logging bulk import audit for employee relationships: ' . $e->getMessage(), [
+                            'trace' => $e->getTraceAsString(),
+                            'file' => $e->getFile(),
+                            'line' => $e->getLine()
+                        ]);
+                    }
+                } else {
+                    $auditDebug['employee_relationships']['skip_reason'] = $auditService === null ? 'audit_service_is_null' : 'employee_relationships_imported_is_zero';
+                    $auditDebug['employee_relationships']['imported_count'] = $employeeRelationshipsImported;
+                }
+                
                 return $this->response
-                    ->withType('application/json')
-                    ->withStringBody(json_encode([
-                        'success' => true,
-                        'message' => 'Import completed successfully',
+                ->withType('application/json')
+                ->withStringBody(json_encode([
+                    'success' => true,
+                    'message' => 'Import completed successfully',
+                    'debug' => $auditDebug ?? null,
                         'role_levels' => ['imported' => $roleLevelsImported, 'updated' => $roleLevelsUpdated],
                         'job_roles' => ['imported' => $jobRolesImported, 'updated' => $jobRolesUpdated],
                         'job_role_relationships' => ['imported' => $jobRoleRelationshipsImported, 'updated' => $jobRoleRelationshipsUpdated],

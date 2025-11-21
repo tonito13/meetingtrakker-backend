@@ -11,6 +11,7 @@ use Cake\Utility\Text;
 use Exception;
 use Cake\Log\Log;
 use Cake\Datasource\ConnectionManager;
+use Cake\ORM\TableRegistry;
 use Cake\Http\Exception\BadRequestException;
 use Cake\Http\Exception\UnauthorizedException;
 
@@ -529,12 +530,53 @@ class RoleLevelsController extends ApiController
 
             // Log audit action
             $userData = AuditHelper::extractUserData($authResult);
+            // Override company_id and username with the correct values from controller
+            $userData['company_id'] = (string)$companyId;
+            $userData['username'] = $username ?? $userData['username'] ?? 'system';
+            $userData['user_id'] = $authData->id ?? $authData['id'] ?? $authData->sub ?? $authData['sub'] ?? $userData['user_id'] ?? 0;
+            
+            // If we now have a user_id but full_name wasn't fetched, fetch it now
+            if (!empty($userData['user_id']) && (empty($userData['full_name']) || $userData['full_name'] === 'Unknown')) {
+                try {
+                    $usersTable = TableRegistry::getTableLocator()->get('Users', [
+                        'connection' => ConnectionManager::get('default')
+                    ]);
+                    
+                    $user = $usersTable->find()
+                        ->select(['first_name', 'last_name'])
+                        ->where(['id' => $userData['user_id']])
+                        ->first();
+                    
+                    if ($user) {
+                        $firstName = $user->first_name ?? '';
+                        $lastName = $user->last_name ?? '';
+                        $fullName = trim($firstName . ' ' . $lastName);
+                        if (!empty($fullName)) {
+                            $userData['full_name'] = $fullName;
+                            $userData['employee_name'] = $fullName;
+                        }
+                    }
+                } catch (\Exception $e) {
+                    Log::error('Error fetching user full name in controller: ' . $e->getMessage());
+                }
+            }
+            
+            // Ensure full_name is preserved (don't overwrite it if it was already fetched)
+            if (empty($userData['full_name']) && !empty($userData['employee_name'])) {
+                $userData['full_name'] = $userData['employee_name'];
+            }
+            
             $roleLevelName = AuditHelper::extractRoleLevelName($answers);
             
             Log::debug('🔍 DEBUG: addRoleLevel - Audit logging data', [
                 'level_unique_id' => $level->level_unique_id,
                 'role_level_name' => $roleLevelName,
                 'user_data' => $userData,
+                'user_data_keys' => array_keys($userData),
+                'full_name' => $userData['full_name'] ?? 'NOT_SET',
+                'employee_name' => $userData['employee_name'] ?? 'NOT_SET',
+                'username' => $userData['username'] ?? 'NOT_SET',
+                'user_id' => $userData['user_id'] ?? 'NOT_SET',
                 'answers' => $answers
             ]);
             
@@ -670,13 +712,62 @@ class RoleLevelsController extends ApiController
         $connection->commit();
 
         // Log audit action
+        $authData = $authResult->getData();
+        $username = null;
+        if ($authData instanceof \ArrayObject || is_array($authData)) {
+            $username = $authData['username'] ?? $authData['sub'] ?? null;
+        } elseif (is_object($authData)) {
+            $username = $authData->username ?? $authData->sub ?? null;
+        }
+        
         $userData = AuditHelper::extractUserData($authResult);
+        // Override company_id and username with the correct values from controller
+        $userData['company_id'] = (string)$companyId;
+        $userData['username'] = $username ?? $userData['username'] ?? 'system';
+        $userData['user_id'] = $authData->id ?? $authData['id'] ?? $authData->sub ?? $authData['sub'] ?? $userData['user_id'] ?? 0;
+        
+        // If we now have a user_id but full_name wasn't fetched, fetch it now
+        if (!empty($userData['user_id']) && (empty($userData['full_name']) || $userData['full_name'] === 'Unknown')) {
+            try {
+                $usersTable = TableRegistry::getTableLocator()->get('Users', [
+                    'connection' => ConnectionManager::get('default')
+                ]);
+                
+                $user = $usersTable->find()
+                    ->select(['first_name', 'last_name'])
+                    ->where(['id' => $userData['user_id']])
+                    ->first();
+                
+                if ($user) {
+                    $firstName = $user->first_name ?? '';
+                    $lastName = $user->last_name ?? '';
+                    $fullName = trim($firstName . ' ' . $lastName);
+                    if (!empty($fullName)) {
+                        $userData['full_name'] = $fullName;
+                        $userData['employee_name'] = $fullName;
+                    }
+                }
+            } catch (\Exception $e) {
+                Log::error('Error fetching user full name in controller: ' . $e->getMessage());
+            }
+        }
+        
+        // Ensure full_name is preserved (don't overwrite it if it was already fetched)
+        if (empty($userData['full_name']) && !empty($userData['employee_name'])) {
+            $userData['full_name'] = $userData['employee_name'];
+        }
+        
         $roleLevelName = $roleLevel->name ?? 'Unnamed Role Level';
         
         Log::debug('🔍 DEBUG: deleteRoleLevel - Audit logging data', [
             'role_level_id' => $roleLevelId,
             'role_level_name' => $roleLevelName,
-            'user_data' => $userData
+            'user_data' => $userData,
+            'user_data_keys' => array_keys($userData),
+            'full_name' => $userData['full_name'] ?? 'NOT_SET',
+            'employee_name' => $userData['employee_name'] ?? 'NOT_SET',
+            'username' => $userData['username'] ?? 'NOT_SET',
+            'user_id' => $userData['user_id'] ?? 'NOT_SET'
         ]);
         
         AuditHelper::logRoleLevelAction(
@@ -940,19 +1031,30 @@ class RoleLevelsController extends ApiController
 
     public function updateRoleLevel()
     {
+        // Initialize debug immediately
+        $GLOBALS['audit_debug'] = [
+            'function_called' => true,
+            'timestamp' => date('Y-m-d H:i:s'),
+            'method' => 'updateRoleLevel'
+        ];
+        
         Configure::write('debug', true);
         $this->request->allowMethod(['post']);
 
         // Authenticate user
         $authResult = $this->Authentication->getResult();
         if (!$authResult || !$authResult->isValid()) {
+            $GLOBALS['audit_debug']['auth_failed'] = true;
             return $this->response->withStatus(401)
                 ->withType('application/json')
                 ->withStringBody(json_encode([
                     'success' => false,
                     'message' => 'Unauthorized access',
+                    'debug' => $GLOBALS['audit_debug'] ?? []
                 ]));
         }
+        
+        $GLOBALS['audit_debug']['auth_success'] = true;
 
         $companyId = $this->getCompanyId($authResult);
         $authData = $authResult->getData();
@@ -980,7 +1082,8 @@ class RoleLevelsController extends ApiController
 
         $LevelTemplatesTable = $this->getTable('LevelTemplates', $companyId);
         $RoleLevelsTable = $this->getTable('RoleLevels', $companyId);
-        $connection = ConnectionManager::get('client_' . $companyId);
+        // Use the connection from the table to ensure we use the correct connection (handles test environment)
+        $connection = $RoleLevelsTable->getConnection();
 
         try {
             $connection->begin();
@@ -1085,12 +1188,53 @@ class RoleLevelsController extends ApiController
 
             // Log audit action with field change tracking
             $userData = AuditHelper::extractUserData($authResult);
+            // Override company_id and username with the correct values from controller
+            $userData['company_id'] = (string)$companyId;
+            $userData['username'] = $username ?? $userData['username'] ?? 'system';
+            $userData['user_id'] = $authData->id ?? $authData['id'] ?? $authData->sub ?? $authData['sub'] ?? $userData['user_id'] ?? 0;
+            
+            // If we now have a user_id but full_name wasn't fetched, fetch it now
+            if (!empty($userData['user_id']) && (empty($userData['full_name']) || $userData['full_name'] === 'Unknown')) {
+                try {
+                    $usersTable = TableRegistry::getTableLocator()->get('Users', [
+                        'connection' => ConnectionManager::get('default')
+                    ]);
+                    
+                    $user = $usersTable->find()
+                        ->select(['first_name', 'last_name'])
+                        ->where(['id' => $userData['user_id']])
+                        ->first();
+                    
+                    if ($user) {
+                        $firstName = $user->first_name ?? '';
+                        $lastName = $user->last_name ?? '';
+                        $fullName = trim($firstName . ' ' . $lastName);
+                        if (!empty($fullName)) {
+                            $userData['full_name'] = $fullName;
+                            $userData['employee_name'] = $fullName;
+                        }
+                    }
+                } catch (\Exception $e) {
+                    Log::error('Error fetching user full name in controller: ' . $e->getMessage());
+                }
+            }
+            
+            // Ensure full_name is preserved (don't overwrite it if it was already fetched)
+            if (empty($userData['full_name']) && !empty($userData['employee_name'])) {
+                $userData['full_name'] = $userData['employee_name'];
+            }
+            
             $roleLevelName = AuditHelper::extractRoleLevelName($answers);
             
             Log::debug('🔍 DEBUG: updateRoleLevel - Audit logging data', [
                 'level_unique_id' => $level_unique_id,
                 'role_level_name' => $roleLevelName,
                 'user_data' => $userData,
+                'user_data_keys' => array_keys($userData),
+                'full_name' => $userData['full_name'] ?? 'NOT_SET',
+                'employee_name' => $userData['employee_name'] ?? 'NOT_SET',
+                'username' => $userData['username'] ?? 'NOT_SET',
+                'user_id' => $userData['user_id'] ?? 'NOT_SET',
                 'answers' => $answers
             ]);
             
@@ -1121,38 +1265,88 @@ class RoleLevelsController extends ApiController
                 'field_changes' => $fieldChanges,
                 'field_changes_count' => count($fieldChanges),
                 'field_changes_empty' => empty($fieldChanges),
-                'old_answers' => $oldAnswers
+                'old_answers' => $oldAnswers,
+                'old_flat_answers' => $oldFlatAnswers,
+                'new_flat_answers' => $newFlatAnswers
             ]);
+            
+            // Add to debug info for frontend
+            $GLOBALS['audit_debug']['field_changes_count'] = count($fieldChanges);
+            $GLOBALS['audit_debug']['field_changes_empty'] = empty($fieldChanges);
+            $GLOBALS['audit_debug']['field_changes_sample'] = array_slice($fieldChanges, 0, 3);
             
             Log::debug('🔍 DEBUG: updateRoleLevel - Calling AuditHelper::logRoleLevelAction', [
                 'action' => 'UPDATE',
                 'level_unique_id' => $level_unique_id,
                 'role_level_name' => $roleLevelName,
                 'field_changes' => $fieldChanges,
-                'field_changes_count' => count($fieldChanges)
+                'field_changes_count' => count($fieldChanges),
+                'field_changes_empty' => empty($fieldChanges)
             ]);
             
-            AuditHelper::logRoleLevelAction(
-                'UPDATE',
-                $level_unique_id,
-                $roleLevelName,
-                $userData,
-                $this->request,
-                $fieldChanges
-            );
+            // Merge audit debug info (don't overwrite field_changes info we just added)
+            if (!isset($GLOBALS['audit_debug'])) {
+                $GLOBALS['audit_debug'] = [];
+            }
+            $GLOBALS['audit_debug']['controller_called'] = true;
+            $GLOBALS['audit_debug']['user_data'] = $userData;
+            
+            try {
+                AuditHelper::logRoleLevelAction(
+                    'UPDATE',
+                    $level_unique_id,
+                    $roleLevelName,
+                    $userData,
+                    $this->request,
+                    $fieldChanges
+                );
+                $GLOBALS['audit_debug']['helper_completed'] = true;
+            } catch (\Exception $e) {
+                $GLOBALS['audit_debug']['exception'] = true;
+                $GLOBALS['audit_debug']['exception_message'] = $e->getMessage();
+                $GLOBALS['audit_debug']['exception_trace'] = $e->getTraceAsString();
+                Log::error('Exception in audit logging: ' . $e->getMessage(), [
+                    'trace' => $e->getTraceAsString()
+                ]);
+            }
 
+            // Collect audit debug info from global variable
+            $auditDebugInfo = $GLOBALS['audit_debug'] ?? [
+                'error' => 'Audit debug info not found - audit may not have been called'
+            ];
+            
+            // Add final status
+            $auditDebugInfo['response_sent'] = true;
+            $auditDebugInfo['response_timestamp'] = date('Y-m-d H:i:s');
+            
+            $responseData = [
+                'success' => true,
+                'message' => 'Role Level updated successfully.',
+                'debug' => $auditDebugInfo, // Temporary debug info - CHECK THIS IN NETWORK TAB
+                'data' => [
+                    'level_id' => $level->id,
+                    'level_unique_id' => $level->level_unique_id,
+                    'template_id' => $level->template_id,
+                    'answers' => $answers,
+                ],
+            ];
+            
+            // Log to help debug
+            Log::debug('🔍 DEBUG: updateRoleLevel - Response being sent', [
+                'debug_info' => $auditDebugInfo,
+                'response_keys' => array_keys($responseData)
+            ]);
+            
             return $this->response->withType('application/json')
-                ->withStringBody(json_encode([
-                    'success' => true,
-                    'message' => 'Role Level updated successfully.',
-                    'data' => [
-                        'level_id' => $level->id,
-                        'level_unique_id' => $level->level_unique_id,
-                        'template_id' => $level->template_id,
-                        'answers' => $answers,
-                    ],
-                ]));
+                ->withStringBody(json_encode($responseData));
         } catch (\Exception $e) {
+            // Add error to debug info
+            $auditDebugInfo = $GLOBALS['audit_debug'] ?? [];
+            $auditDebugInfo['exception_in_update'] = true;
+            $auditDebugInfo['exception_message'] = $e->getMessage();
+            $auditDebugInfo['exception_file'] = $e->getFile();
+            $auditDebugInfo['exception_line'] = $e->getLine();
+            
             if (isset($connection) && $connection->inTransaction()) {
                 $connection->rollback();
             }
@@ -1163,6 +1357,7 @@ class RoleLevelsController extends ApiController
                 ->withStringBody(json_encode([
                     'success' => false,
                     'message' => $e->getMessage(),
+                    'debug' => $auditDebugInfo, // Include debug even on error
                 ]));
         }
     }

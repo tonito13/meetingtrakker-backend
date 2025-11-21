@@ -67,7 +67,8 @@ class AuditLog extends Entity
      * @var array<string>
      */
     protected array $_virtual = [
-        'employee_name'
+        'employee_name',
+        'full_name'
     ];
 
     /**
@@ -95,7 +96,18 @@ class AuditLog extends Entity
             ? json_decode($this->user_data, true) 
             : $this->user_data;
 
-        return $userData['employee_name'] ?? $this->username ?? 'Unknown';
+        // Check for full_name first, then employee_name, then fall back to username
+        return $userData['full_name'] ?? $userData['employee_name'] ?? $this->username ?? 'Unknown';
+    }
+    
+    /**
+     * Get full name from user_data (virtual field)
+     *
+     * @return string
+     */
+    public function getFullName(): string
+    {
+        return $this->getEmployeeName();
     }
 
     /**

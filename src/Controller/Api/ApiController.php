@@ -175,9 +175,31 @@ class ApiController extends Controller
             if ($companyId == 'default') {
                 $connection = ConnectionManager::get('default');
             } else {
-                // In test environment, use the test connection for company-specific tables
+                // In test environment, use the test company database connection for company-specific tables
                 if (Configure::read('debug') && php_sapi_name() === 'cli') {
-                    $connection = ConnectionManager::get('test');
+                    // Use the test company database connection - this should always exist for company-specific tables
+                    // Never fall back to 'test' (workmatica_test) as it's the central database, not company-specific
+                    // Try the alias first (test_client_{companyId}), then the direct connection name
+                    $testConnectionName = 'test_client_' . $companyId;
+                    $directConnectionName = 'client_' . $companyId . '_test';
+                    
+                    try {
+                        // First try the alias (created in tests/bootstrap.php)
+                        $connection = ConnectionManager::get($testConnectionName);
+                    } catch (\Exception $e1) {
+                        try {
+                            // Fallback to direct connection name
+                            $connection = ConnectionManager::get($directConnectionName);
+                        } catch (\Exception $e2) {
+                            // If neither connection exists, throw a clear error
+                            // Company-specific tables should NEVER use the central 'test' database
+                            throw new \Exception(
+                                "Test company database connection not found. Tried '{$testConnectionName}' and '{$directConnectionName}'. " .
+                                "Company-specific tables should never use the central 'test' database. " .
+                                "Error 1: " . $e1->getMessage() . " Error 2: " . $e2->getMessage()
+                            );
+                        }
+                    }
                 } else {
                     $connection = ConnectionManager::get('client_' . $companyId);
                 }

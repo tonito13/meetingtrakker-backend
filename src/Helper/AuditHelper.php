@@ -7,6 +7,8 @@ namespace App\Helper;
 use App\Service\AuditService;
 use Cake\Http\ServerRequest;
 use Cake\Log\Log;
+use Cake\ORM\TableRegistry;
+use Cake\Datasource\ConnectionManager;
 
 /**
  * Audit Helper
@@ -384,26 +386,70 @@ class AuditHelper
                 'user_id' => 0,
                 'username' => 'system',
                 'employee_name' => 'System',
+                'full_name' => 'System',
                 'company_id' => 'default',
             ];
         }
 
         $data = $authResult->getData();
         
+        // Extract user ID and username from auth data
+        $userId = null;
+        $username = null;
+        
+        if (is_object($data)) {
+            $userId = $data->id ?? $data->sub ?? null;
+            $username = $data->username ?? null;
+        } elseif (is_array($data) || $data instanceof \ArrayObject) {
+            $userId = $data['id'] ?? $data['sub'] ?? null;
+            $username = $data['username'] ?? null;
+        }
+        
         Log::debug('🔍 DEBUG: extractUserData - Auth data', [
             'data' => $data,
             'data_type' => gettype($data),
-            'id' => $data->id ?? 'not_set',
-            'username' => $data->username ?? 'not_set',
-            'employee_name' => $data->employee_name ?? 'not_set',
-            'company_id' => $data->company_id ?? 'not_set'
+            'user_id' => $userId,
+            'username' => $username,
+            'company_id' => is_object($data) ? ($data->company_id ?? 'not_set') : ($data['company_id'] ?? 'not_set')
         ]);
         
+        // Fetch full name from Users table (in default connection)
+        $fullName = null;
+        if ($userId) {
+            try {
+                $usersTable = TableRegistry::getTableLocator()->get('Users', [
+                    'connection' => ConnectionManager::get('default')
+                ]);
+                
+                $user = $usersTable->find()
+                    ->select(['first_name', 'last_name'])
+                    ->where(['id' => $userId])
+                    ->first();
+                
+                if ($user) {
+                    $firstName = $user->first_name ?? '';
+                    $lastName = $user->last_name ?? '';
+                    $fullName = trim($firstName . ' ' . $lastName);
+                    if (empty($fullName)) {
+                        $fullName = $username ?? 'Unknown';
+                    }
+                } else {
+                    $fullName = $username ?? 'Unknown';
+                }
+            } catch (\Exception $e) {
+                Log::error('Error fetching user full name: ' . $e->getMessage());
+                $fullName = $username ?? 'Unknown';
+            }
+        } else {
+            $fullName = $username ?? 'Unknown';
+        }
+        
         $userData = [
-            'user_id' => $data->id ?? 0,
-            'username' => $data->username ?? 'system',
-            'employee_name' => $data->employee_name ?? $data->username ?? 'Unknown',
-            'company_id' => (string)($data->company_id ?? 'default'),
+            'user_id' => $userId ?? 0,
+            'username' => $username ?? 'system',
+            'employee_name' => $fullName, // Keep for backward compatibility
+            'full_name' => $fullName,
+            'company_id' => (string)(is_object($data) ? ($data->company_id ?? 'default') : ($data['company_id'] ?? 'default')),
         ];
 
         Log::debug('🔍 DEBUG: extractUserData - Final user data', [
@@ -599,6 +645,15 @@ class AuditHelper
         ServerRequest $request,
         array $fieldChanges = []
     ): void {
+        // Store debug info in a global variable that can be accessed by controller
+        $GLOBALS['audit_debug'] = [
+            'helper_called' => true,
+            'action' => $action,
+            'role_level_id' => $roleLevelId,
+            'company_id' => $userData['company_id'] ?? 'default',
+            'timestamp' => date('Y-m-d H:i:s')
+        ];
+        
         try {
             Log::debug('🔍 DEBUG: logRoleLevelAction - Input parameters', [
                 'action' => $action,
@@ -610,7 +665,10 @@ class AuditHelper
             ]);
 
             $companyId = $userData['company_id'] ?? 'default';
+            $GLOBALS['audit_debug']['company_id_used'] = $companyId;
+            
             $auditService = new AuditService($companyId);
+            $GLOBALS['audit_debug']['service_created'] = true;
 
             $clientInfo = AuditService::extractClientInfo($request);
             $userData = array_merge($userData, $clientInfo);
@@ -778,12 +836,13 @@ class AuditHelper
      * @param array $answers
      * @return string
      */
-    public static function extractJobRoleName(array $answers): string
+    public static function extractJobRoleName(array $answers, array $templateStructure = null): string
     {
         Log::debug('🔍 DEBUG: extractJobRoleName - Input answers', [
             'answers' => $answers,
             'answers_type' => gettype($answers),
-            'answers_count' => count($answers)
+            'answers_count' => count($answers),
+            'has_template_structure' => !empty($templateStructure)
         ]);
 
         if (empty($answers)) {
@@ -791,7 +850,53 @@ class AuditHelper
             return 'Unnamed Job Role';
         }
 
-        // Handle nested structure (group ID -> field ID -> value)
+        // If template structure is provided, try to find Official Designation field
+        if (!empty($templateStructure) && is_array($templateStructure)) {
+            $officialDesignationFieldId = null;
+            
+            // Search for "Official Designation" field in template structure
+            foreach ($templateStructure as $group) {
+                if (isset($group['fields']) && is_array($group['fields'])) {
+                    foreach ($group['fields'] as $field) {
+                        $fieldLabel = $field['label'] ?? '';
+                        $customLabel = $field['customize_field_label'] ?? '';
+                        
+                        // Check if this is the Official Designation field
+                        if ($fieldLabel === 'Official Designation' || $customLabel === 'Official Designation' || 
+                            $fieldLabel === 'Job Title' || $customLabel === 'Job Title') {
+                            $officialDesignationFieldId = $field['id'] ?? null;
+                            Log::debug('🔍 DEBUG: extractJobRoleName - Found Official Designation field', [
+                                'field_id' => $officialDesignationFieldId,
+                                'field_label' => $fieldLabel,
+                                'custom_label' => $customLabel,
+                                'group_id' => $group['id'] ?? null
+                            ]);
+                            break 2; // Exit both loops
+                        }
+                    }
+                }
+            }
+            
+            // If we found the Official Designation field ID, extract its value
+            if ($officialDesignationFieldId !== null) {
+                // Search through answers to find the value for this field ID
+                foreach ($answers as $groupId => $groupAnswers) {
+                    if (is_array($groupAnswers) && isset($groupAnswers[$officialDesignationFieldId])) {
+                        $officialDesignation = $groupAnswers[$officialDesignationFieldId];
+                        if (!empty($officialDesignation)) {
+                            Log::debug('🔍 DEBUG: extractJobRoleName - Extracted Official Designation', [
+                                'group_id' => $groupId,
+                                'field_id' => $officialDesignationFieldId,
+                                'official_designation' => $officialDesignation
+                            ]);
+                            return (string)$officialDesignation;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: Handle nested structure (group ID -> field ID -> value)
         $flatAnswers = [];
         $answerKeys = array_keys($answers);
         
@@ -817,11 +922,11 @@ class AuditHelper
             'flat_answer_keys' => array_keys($flatAnswers)
         ]);
 
-        // Get the first field value (job role name)
+        // Get the first field value (fallback - should be Role Code)
         $flatAnswerKeys = array_keys($flatAnswers);
         if (!empty($flatAnswerKeys)) {
             $jobRoleName = $flatAnswers[$flatAnswerKeys[0]] ?? 'Unnamed Job Role';
-            Log::debug('🔍 DEBUG: extractJobRoleName - Extracted job role name', [
+            Log::debug('🔍 DEBUG: extractJobRoleName - Extracted job role name (fallback)', [
                 'first_key' => $flatAnswerKeys[0],
                 'job_role_name' => $jobRoleName
             ]);

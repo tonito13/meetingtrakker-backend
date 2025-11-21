@@ -43,6 +43,9 @@ class EmployeeTemplatesTable extends Table
         $this->setDisplayField('name');
         $this->setPrimaryKey('id');
 
+        // Configure structure field as JSON type for automatic encoding/decoding
+        $this->getSchema()->setColumnType('structure', 'json');
+
         $this->addBehavior('Timestamp');
     }
 

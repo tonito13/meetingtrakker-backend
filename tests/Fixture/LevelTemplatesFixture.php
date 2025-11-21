@@ -14,6 +14,14 @@ use Cake\TestSuite\Fixture\TestFixture;
 class LevelTemplatesFixture extends TestFixture
 {
     /**
+     * Connection name to use for this fixture
+     * Company-specific tables should use the company-specific test database
+     * 
+     * @var string
+     */
+    public string $connection = 'test_client_200001';
+
+    /**
      * Table name
      * 
      * @var string
@@ -54,7 +62,7 @@ class LevelTemplatesFixture extends TestFixture
             [
                 'id' => 4001,
                 'company_id' => 200001,
-                'name' => 'Standard Level Template',
+                'name' => 'level',
                 'structure' => json_encode([
                     [
                         'id' => 'level_info',

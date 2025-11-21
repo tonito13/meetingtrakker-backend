@@ -14,6 +14,14 @@ use Cake\TestSuite\Fixture\TestFixture;
 class JobRoleTemplatesFixture extends TestFixture
 {
     /**
+     * Connection name to use for this fixture
+     * Company-specific tables should use the company-specific test database
+     * 
+     * @var string
+     */
+    public string $connection = 'test_client_200001';
+
+    /**
      * Table name
      *
      * @var string
@@ -54,7 +62,7 @@ class JobRoleTemplatesFixture extends TestFixture
             [
                 'id' => 9001, // Use a unique ID to avoid conflicts
                 'company_id' => 200001,
-                'name' => 'Standard Job Role Template',
+                'name' => 'job_role',
                 'created_by' => 'admin',
                 'structure' => json_encode([
                     [
