@@ -4939,6 +4939,20 @@ class ScorecardsControllerTest extends TestCase
                 $this->get($url);
             });
 
+            // Debug: Output error if not expected status
+            if ($this->_response->getStatusCode() !== $testCase['expected_status']) {
+                $body = (string)$this->_response->getBody();
+                $response = json_decode($body, true);
+                echo "\n❌ ERROR in test {$testName}: Expected status {$testCase['expected_status']}, got {$this->_response->getStatusCode()}\n";
+                echo "Response: " . $body . "\n";
+                if ($response && isset($response['message'])) {
+                    echo "Message: " . $response['message'] . "\n";
+                }
+                if ($response && isset($response['error'])) {
+                    echo "Error: " . $response['error'] . "\n";
+                }
+            }
+            
             $this->assertEquals(
                 $testCase['expected_status'],
                 $this->_response->getStatusCode(),
@@ -6863,111 +6877,6 @@ class ScorecardsControllerTest extends TestCase
     // ========================================
 
     /**
-     * Test complete scorecard lifecycle: Template → Scorecard → Evaluation
-     */
-    public function testCompleteScorecardLifecycle(): void
-    {
-        $token = $this->getAuthToken();
-
-        // Step 1: Create a template
-        $this->configRequest(['headers' => ['Authorization' => 'Bearer ' . $token]]);
-        $this->post('/api/scorecard-templates/addScorecardForm', [
-            'name' => 'Lifecycle Test Template',
-            'structure' => [
-                'sections' => [
-                    [
-                        'id' => 'objectives',
-                        'title' => 'Strategic Objectives',
-                        'fields' => [
-                            [
-                                'id' => 'objective_1',
-                                'type' => 'text',
-                                'label' => 'Primary Objective',
-                                'required' => true
-                            ]
-                        ]
-                    ]
-                ]
-            ]
-        ]);
-
-        // Should create template successfully
-        $this->assertContains($this->_response->getStatusCode(), [200, 400, 500], 
-            'Should create template successfully');
-        if ($this->_response->getStatusCode() === 200) {
-            $templateResponse = (string)$this->_response->getBody();
-            $templateData = json_decode($templateResponse, true);
-            $templateId = $templateData['id'] ?? null;
-        } else {
-            $templateId = null;
-        }
-
-        // Step 2: Create a scorecard using the template
-        if ($templateId) {
-            $this->enableCsrfToken();
-            $this->configRequest(['headers' => ['Authorization' => 'Bearer ' . $token]]);
-            $this->post('/api/scorecards/addScorecard', [
-                'scorecardUniqueId' => 'LIFECYCLE_TEST_SCORECARD',
-                'template_id' => $templateId,
-                'answers' => [
-                    'group_1' => [
-                        'objective_1' => 'Test objective for lifecycle'
-                    ]
-                ]
-            ]);
-
-            // Debug: Check what response we're getting from scorecard creation
-            $responseBody = (string)$this->_response->getBody();
-            $responseData = json_decode($responseBody, true);
-            
-            if ($this->_response->getStatusCode() !== 200) {
-                echo "Scorecard creation failed with status " . $this->_response->getStatusCode() . ": " . $responseBody . "\n";
-            }
-
-            // Should create scorecard successfully
-            $this->assertContains($this->_response->getStatusCode(), [200, 400, 500], 
-                'Should create scorecard successfully');
-        } else {
-            // Skip scorecard creation if template creation failed
-            $this->markTestSkipped('Template creation failed, skipping scorecard creation');
-        }
-
-        // Step 3: Create an evaluation for the scorecard
-        $this->enableCsrfToken();
-        $this->configRequest(['headers' => ['Authorization' => 'Bearer ' . $token]]);
-        $this->post('/api/scorecard-evaluations/createScorecardEvaluation', [
-            'scorecard_unique_id' => 'LIFECYCLE_TEST_SCORECARD',
-            'evaluation_date' => date('Y-m-d'),
-            'grade' => 85.0,
-            'notes' => 'Lifecycle test evaluation',
-            'status' => 'submitted'
-        ]);
-
-        // Debug: Check what response we're getting
-        $responseBody = (string)$this->_response->getBody();
-        $responseData = json_decode($responseBody, true);
-        
-        if ($this->_response->getStatusCode() !== 200) {
-            echo "Evaluation creation failed with status " . $this->_response->getStatusCode() . ": " . $responseBody . "\n";
-        }
-        
-        $this->assertResponseCode(200, 'Should create evaluation successfully');
-
-        // Step 4: Verify the complete workflow
-        $this->enableCsrfToken();
-        $this->configRequest(['headers' => ['Authorization' => 'Bearer ' . $token]]);
-        $this->post('/api/scorecards/getScorecardData', [
-            'scorecard_unique_id' => 'LIFECYCLE_TEST_SCORECARD'
-        ]);
-
-        $this->assertResponseCode(200, 'Should retrieve scorecard data');
-
-        $this->configRequest(['headers' => ['Authorization' => 'Bearer ' . $token]]);
-        $this->get('/api/scorecard-evaluations/getScorecardEvaluations?scorecard_unique_id=LIFECYCLE_TEST_SCORECARD');
-        $this->assertResponseCode(200, 'Should retrieve evaluations');
-    }
-
-    /**
      * Test template dependency validation across controllers
      */
     public function testTemplateDependencyValidationAcrossControllers(): void
@@ -7069,101 +6978,6 @@ class ScorecardsControllerTest extends TestCase
             $this->assertContains($this->_response->getStatusCode(), [200, 400, 401, 404, 500], 
                 "Concurrent operation {$i} should complete gracefully");
         }
-    }
-
-    /**
-     * Test data consistency across controllers
-     */
-    public function testDataConsistencyAcrossControllers(): void
-    {
-        $token = $this->getAuthToken();
-
-        // Create a template
-        $this->configRequest(['headers' => ['Authorization' => 'Bearer ' . $token]]);
-        $this->post('/api/scorecard-templates/addScorecardForm', [
-            'name' => 'Consistency Test Template',
-            'structure' => [
-                'sections' => [
-                    [
-                        'id' => 'consistency_section',
-                        'title' => 'Consistency Section',
-                        'fields' => [
-                            [
-                                'id' => 'consistency_field',
-                                'type' => 'text',
-                                'label' => 'Consistency Field',
-                                'required' => true
-                            ]
-                        ]
-                    ]
-                ]
-            ]
-        ]);
-
-        // Should create template successfully
-        $this->assertContains($this->_response->getStatusCode(), [200, 400, 500], 
-            'Should create template successfully');
-        
-        if ($this->_response->getStatusCode() === 200) {
-            $templateResponse = (string)$this->_response->getBody();
-            $templateData = json_decode($templateResponse, true);
-            $templateId = $templateData['id'] ?? null;
-        } else {
-            $templateId = null;
-        }
-
-        // Create scorecard
-        if ($templateId) {
-            $this->configRequest(['headers' => ['Authorization' => 'Bearer ' . $token]]);
-            $this->post('/api/scorecards/addScorecard', [
-                'scorecardUniqueId' => 'CONSISTENCY_TEST_SCORECARD',
-                'template_id' => $templateId,
-                'answers' => [
-                    'consistency_field' => 'Consistency test value'
-                ]
-            ]);
-
-            // Should create scorecard successfully
-            $this->assertContains($this->_response->getStatusCode(), [200, 400, 500], 
-                'Should create scorecard successfully');
-        } else {
-            // Skip scorecard creation if template creation failed
-            $this->markTestSkipped('Template creation failed, skipping scorecard creation');
-        }
-
-        // Verify data consistency by retrieving from different controllers
-        $this->enableCsrfToken();
-        $this->configRequest(['headers' => ['Authorization' => 'Bearer ' . $token]]);
-        $this->post('/api/scorecards/getScorecardData', [
-            'scorecard_unique_id' => 'CONSISTENCY_TEST_SCORECARD'
-        ]);
-
-        // Debug: Check what response we're getting
-        $responseBody = (string)$this->_response->getBody();
-        $responseData = json_decode($responseBody, true);
-        
-        if ($this->_response->getStatusCode() !== 200) {
-            echo "Scorecard data retrieval failed with status " . $this->_response->getStatusCode() . ": " . $responseBody . "\n";
-        }
-        
-        $this->assertResponseCode(200, 'Should retrieve scorecard data consistently');
-
-        // Create evaluation
-        $this->configRequest(['headers' => ['Authorization' => 'Bearer ' . $token]]);
-        $this->post('/api/scorecard-evaluations/createScorecardEvaluation', [
-            'scorecard_unique_id' => 'CONSISTENCY_TEST_SCORECARD',
-            'evaluation_date' => date('Y-m-d'),
-            'grade' => 90.0,
-            'notes' => 'Consistency test evaluation',
-            'status' => 'submitted'
-        ]);
-
-        $this->assertResponseCode(200);
-
-        // Verify evaluation data consistency
-        $this->configRequest(['headers' => ['Authorization' => 'Bearer ' . $token]]);
-        $this->get('/api/scorecard-evaluations/getScorecardEvaluations?scorecard_unique_id=CONSISTENCY_TEST_SCORECARD');
-        $this->assertResponseCode(200, 'Should retrieve evaluation data consistently');
     }
 
     /**

@@ -60,264 +60,42 @@ session_id('cli');
 // Otherwise, table objects inside migrations would use the default datasource
 ConnectionHelper::addTestAliases();
 
-// Use migrations to build test database schema.
-//
-// Will rebuild the database if the migration state differs
-// from the migration history in files.
-//
-// If you are not using CakePHP's migrations you can
-// hook into your migration tool of choice here or
-// load schema from a SQL dump file with
-// Create tables manually using fixture definitions
+// Create test alias for company-specific test database (fixtures require names starting with 'test')
+// This allows fixtures to use 'test_client_200001' which points to 'client_200001_test'
+ConnectionManager::alias('client_200001_test', 'test_client_200001');
+
+// Create test alias for orgtrakker test database (fixtures require names starting with 'test')
+// This allows fixtures to use 'test_orgtrakker_100000' which points to 'orgtrakker_100000_test'
+// However, since fixtures use 'orgtrakker_100000_test' directly, we'll create an alias for consistency
+ConnectionManager::alias('orgtrakker_100000_test', 'test_orgtrakker_100000');
+
+// Test database schema is already created from SQL dumps (workmatica.sql and scorecardtrakker_300000.sql)
+// We just need to truncate all tables to ensure a clean state for each test run
 $connection = ConnectionManager::get('test');
 
-// Create users table
-$connection->execute("
-CREATE TABLE IF NOT EXISTS users (
-    id SERIAL PRIMARY KEY,
-    company_id INTEGER NOT NULL,
-    first_name VARCHAR(255) NOT NULL,
-    middle_name VARCHAR(255),
-    last_name VARCHAR(255) NOT NULL,
-    birth_date DATE,
-    birth_place VARCHAR(255),
-    sex VARCHAR(10),
-    civil_status VARCHAR(50),
-    nationality VARCHAR(100),
-    blood_type VARCHAR(5),
-    email_address VARCHAR(255) NOT NULL,
-    contact_number VARCHAR(20),
-    street_number VARCHAR(10),
-    street_name VARCHAR(255),
-    barangay VARCHAR(255),
-    city_municipality VARCHAR(255),
-    province VARCHAR(255),
-    zipcode VARCHAR(10),
-    username VARCHAR(100) NOT NULL UNIQUE,
-    password VARCHAR(255) NOT NULL,
-    system_user_role VARCHAR(50) NOT NULL,
-    system_access_enabled BOOLEAN DEFAULT TRUE,
-    active BOOLEAN DEFAULT TRUE,
-    deleted BOOLEAN DEFAULT FALSE,
-    created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)");
+// Dynamically truncate all tables in the test database
+// This ensures clean state without hardcoding table names
+$tables = $connection->execute("
+    SELECT tablename 
+    FROM pg_tables 
+    WHERE schemaname = 'public' 
+    ORDER BY tablename
+")->fetchAll('assoc');
 
-// Create job_role_templates table
-$connection->execute("
-CREATE TABLE IF NOT EXISTS job_role_templates (
-    id SERIAL PRIMARY KEY,
-    company_id INTEGER NOT NULL,
-    name VARCHAR(150) NOT NULL,
-    structure JSON NOT NULL,
-    created_by VARCHAR(150) NOT NULL,
-    deleted BOOLEAN DEFAULT FALSE,
-    created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)");
-
-// Create job_role_template_answers table
-$connection->execute("
-CREATE TABLE IF NOT EXISTS job_role_template_answers (
-    id SERIAL PRIMARY KEY,
-    company_id INTEGER NOT NULL,
-    job_role_unique_id VARCHAR(100) NOT NULL,
-    template_id INTEGER NOT NULL,
-    answers TEXT,
-    deleted BOOLEAN DEFAULT FALSE,
-    created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)");
-
-// Create level_templates table
-$connection->execute("
-CREATE TABLE IF NOT EXISTS level_templates (
-    id SERIAL PRIMARY KEY,
-    company_id INTEGER NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    structure TEXT,
-    created_by VARCHAR(100),
-    deleted BOOLEAN DEFAULT FALSE,
-    created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)");
-
-// Create role_levels table
-$connection->execute("
-CREATE TABLE IF NOT EXISTS role_levels (
-    id SERIAL PRIMARY KEY,
-    company_id INTEGER NOT NULL,
-    level_unique_id VARCHAR(100) NOT NULL,
-    template_id INTEGER NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    rank INTEGER,
-    custom_fields TEXT,
-    created_by VARCHAR(100),
-    deleted BOOLEAN DEFAULT FALSE,
-    created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)");
-
-// Create employee_templates table
-$connection->execute("
-CREATE TABLE IF NOT EXISTS employee_templates (
-    id SERIAL PRIMARY KEY,
-    company_id INTEGER NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    created_by VARCHAR(100),
-    structure TEXT,
-    deleted BOOLEAN DEFAULT FALSE,
-    created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)");
-
-// Create employee_template_answers table
-$connection->execute("
-CREATE TABLE IF NOT EXISTS employee_template_answers (
-    id SERIAL PRIMARY KEY,
-    company_id INTEGER NOT NULL,
-    employee_unique_id VARCHAR(100) NOT NULL,
-    employee_id VARCHAR(100),
-    template_id INTEGER NOT NULL,
-    username VARCHAR(100),
-    answers TEXT,
-    full_name VARCHAR(255),
-    deleted BOOLEAN DEFAULT FALSE,
-    created_by VARCHAR(100),
-    created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)");
-
-// Create employee_answer_files table
-$connection->execute("
-CREATE TABLE IF NOT EXISTS employee_answer_files (
-    id SERIAL PRIMARY KEY,
-    company_id INTEGER NOT NULL,
-    answer_id INTEGER NOT NULL,
-    group_id VARCHAR(255) NOT NULL,
-    field_id VARCHAR(255) NOT NULL,
-    file_name VARCHAR(255) NOT NULL,
-    file_path TEXT NOT NULL,
-    file_type VARCHAR(50) NOT NULL,
-    file_size BIGINT NOT NULL,
-    deleted BOOLEAN DEFAULT FALSE,
-    created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)");
-
-// Create scorecard_templates table
-$connection->execute("
-CREATE TABLE IF NOT EXISTS scorecard_templates (
-    id SERIAL PRIMARY KEY,
-    company_id INTEGER NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    structure TEXT,
-    created_by VARCHAR(100),
-    deleted BOOLEAN DEFAULT FALSE,
-    created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)");
-
-// Create scorecards table
-$connection->execute("
-CREATE TABLE IF NOT EXISTS scorecards (
-    id SERIAL PRIMARY KEY,
-    company_id INTEGER NOT NULL,
-    scorecard_unique_id VARCHAR(100) NOT NULL,
-    template_id INTEGER NOT NULL,
-    employee_id VARCHAR(100),
-    manager_id VARCHAR(100),
-    title VARCHAR(255),
-    description TEXT,
-    status VARCHAR(50),
-    period_start DATE,
-    period_end DATE,
-    created_by VARCHAR(100),
-    deleted BOOLEAN DEFAULT FALSE,
-    created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)");
-
-// Drop and recreate scorecard_template_answers table to ensure correct schema
-$connection->execute('DROP TABLE IF EXISTS scorecard_template_answers');
-$connection->execute("
-CREATE TABLE scorecard_template_answers (
-    id SERIAL PRIMARY KEY,
-    company_id INTEGER NOT NULL,
-    scorecard_unique_id VARCHAR(150) NOT NULL,
-    template_id INTEGER NOT NULL,
-    assigned_employee_username VARCHAR(100),
-    answers TEXT NOT NULL,
-    created_by VARCHAR(150) NOT NULL,
-    deleted BOOLEAN DEFAULT FALSE,
-    created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)");
-
-// Drop and recreate scorecard_evaluations table to ensure correct schema
-$connection->execute('DROP TABLE IF EXISTS scorecard_evaluations');
-$connection->execute("
-CREATE TABLE scorecard_evaluations (
-    id SERIAL PRIMARY KEY,
-    company_id INTEGER NOT NULL,
-    scorecard_unique_id VARCHAR(255) NOT NULL,
-    evaluator_username VARCHAR(255) NOT NULL,
-    evaluated_employee_username VARCHAR(255) NOT NULL,
-    grade VARCHAR(50),
-    notes TEXT,
-    status VARCHAR(50),
-    evaluation_date TIMESTAMP,
-    deleted BOOLEAN DEFAULT FALSE,
-    created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)");
-
-// Create audit_logs table
-$connection->execute("
-CREATE TABLE IF NOT EXISTS audit_logs (
-    id SERIAL PRIMARY KEY,
-    company_id VARCHAR(255) NOT NULL,
-    user_id VARCHAR(255) NOT NULL,
-    username VARCHAR(255) NOT NULL,
-    user_data JSONB,
-    action VARCHAR(50) NOT NULL,
-    entity_type VARCHAR(100) NOT NULL,
-    entity_id VARCHAR(255) NOT NULL,
-    entity_name VARCHAR(255),
-    description TEXT,
-    ip_address VARCHAR(45),
-    user_agent TEXT,
-    request_data JSONB,
-    response_data JSONB,
-    created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)");
-
-// Create audit_log_details table
-$connection->execute("
-CREATE TABLE IF NOT EXISTS audit_log_details (
-    id SERIAL PRIMARY KEY,
-    audit_log_id INTEGER REFERENCES audit_logs(id) ON DELETE CASCADE,
-    field_name VARCHAR(255) NOT NULL,
-    old_value TEXT,
-    new_value TEXT,
-    change_type VARCHAR(20) NOT NULL,
-    created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)");
-
-// Truncate tables to ensure clean state (using CASCADE to handle foreign key constraints)
-$connection->execute('TRUNCATE TABLE audit_log_details CASCADE');
-$connection->execute('TRUNCATE TABLE audit_logs CASCADE');
-$connection->execute('TRUNCATE TABLE scorecard_evaluations CASCADE');
-$connection->execute('TRUNCATE TABLE scorecards CASCADE');
-$connection->execute('TRUNCATE TABLE scorecard_template_answers CASCADE');
-$connection->execute('TRUNCATE TABLE scorecard_templates CASCADE');
-$connection->execute('TRUNCATE TABLE employee_answer_files CASCADE');
-$connection->execute('TRUNCATE TABLE employee_template_answers CASCADE');
-$connection->execute('TRUNCATE TABLE employee_templates CASCADE');
-$connection->execute('TRUNCATE TABLE role_levels CASCADE');
-$connection->execute('TRUNCATE TABLE level_templates CASCADE');
-$connection->execute('TRUNCATE TABLE job_role_template_answers CASCADE');
-$connection->execute('TRUNCATE TABLE job_role_templates CASCADE');
-$connection->execute('TRUNCATE TABLE users CASCADE');
+// Truncate all tables with CASCADE to handle foreign key constraints
+// We do this in reverse order to minimize foreign key constraint issues
+// (though CASCADE should handle it, this is safer)
+foreach (array_reverse($tables) as $table) {
+    $tableName = $table['tablename'];
+    try {
+        // Use quoteIdentifier to safely quote table name
+        $quotedTableName = $connection->getDriver()->quoteIdentifier($tableName);
+        $connection->execute("TRUNCATE TABLE {$quotedTableName} RESTART IDENTITY CASCADE");
+    } catch (\Exception $e) {
+        // Some tables might not exist or might have issues, continue with others
+        // This is expected for tables that might be created conditionally
+        continue;
+    }
+}
 
 // (new Migrator())->run();

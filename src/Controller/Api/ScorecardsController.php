@@ -12,6 +12,7 @@ use Exception;
 use Cake\Log\Log;
 use Cake\Database\Connection;
 use Cake\Datasource\ConnectionManager;
+use Cake\ORM\TableRegistry;
 
 class ScorecardsController extends ApiController
 {
@@ -660,15 +661,65 @@ class ScorecardsController extends ApiController
 
             // Log audit action
             $userData = AuditHelper::extractUserData($authResult);
+            // Override company_id and username with the correct values from controller
+            $authData = $authResult->getData();
+            $username = null;
+            if ($authData instanceof \ArrayObject || is_array($authData)) {
+                $username = $authData['username'] ?? $authData['sub'] ?? null;
+            } elseif (is_object($authData)) {
+                $username = $authData->username ?? $authData->sub ?? null;
+            }
+            
+            $userData['company_id'] = (string)$companyId;
+            $userData['username'] = $username ?? $userData['username'] ?? 'system';
+            $userData['user_id'] = $authData->id ?? $authData['id'] ?? $authData->sub ?? $authData['sub'] ?? $userData['user_id'] ?? 0;
+            
+            // If we now have a user_id but full_name wasn't fetched, fetch it now
+            if (!empty($userData['user_id']) && (empty($userData['full_name']) || $userData['full_name'] === 'Unknown')) {
+                try {
+                    $usersTable = TableRegistry::getTableLocator()->get('Users', [
+                        'connection' => ConnectionManager::get('default')
+                    ]);
+                    
+                    $user = $usersTable->find()
+                        ->select(['first_name', 'last_name'])
+                        ->where(['id' => $userData['user_id']])
+                        ->first();
+                    
+                    if ($user) {
+                        $firstName = $user->first_name ?? '';
+                        $lastName = $user->last_name ?? '';
+                        $fullName = trim($firstName . ' ' . $lastName);
+                        if (!empty($fullName)) {
+                            $userData['full_name'] = $fullName;
+                            $userData['employee_name'] = $fullName;
+                        }
+                    }
+                } catch (\Exception $e) {
+                    Log::error('Error fetching user full name in controller: ' . $e->getMessage());
+                }
+            }
+            
+            // Ensure full_name is preserved (don't overwrite it if it was already fetched)
+            if (empty($userData['full_name']) && !empty($userData['employee_name'])) {
+                $userData['full_name'] = $userData['employee_name'];
+            }
+            
             $scorecardName = AuditHelper::extractScorecardCode($answers);
             
             Log::debug('🔍 DEBUG: addScorecard - Audit logging data', [
                 'scorecard_unique_id' => $scorecardUniqueId,
                 'scorecard_name' => $scorecardName,
                 'user_data' => $userData,
+                'user_data_keys' => array_keys($userData),
+                'full_name' => $userData['full_name'] ?? 'NOT_SET',
+                'employee_name' => $userData['employee_name'] ?? 'NOT_SET',
+                'username' => $userData['username'] ?? 'NOT_SET',
+                'user_id' => $userData['user_id'] ?? 'NOT_SET',
                 'answers' => $answers
             ]);
             
+            try {
             AuditHelper::logScorecardAction(
                 'CREATE',
                 $scorecardUniqueId,
@@ -676,6 +727,11 @@ class ScorecardsController extends ApiController
                 $userData,
                 $this->request
             );
+            } catch (\Exception $e) {
+                Log::error('Exception in audit logging: ' . $e->getMessage(), [
+                    'trace' => $e->getTraceAsString()
+                ]);
+            }
 
             return $this->response
                 ->withType('application/json')
@@ -765,6 +821,62 @@ class ScorecardsController extends ApiController
             if ($ScorecardTemplateAnswersTable->save($scorecard)) {
                 // Log audit action
                 $userData = AuditHelper::extractUserData($authResult);
+                // Override company_id and username with the correct values from controller
+                $authData = $authResult->getData();
+                $username = null;
+                if ($authData instanceof \ArrayObject || is_array($authData)) {
+                    $username = $authData['username'] ?? $authData['sub'] ?? null;
+                } elseif (is_object($authData)) {
+                    $username = $authData->username ?? $authData->sub ?? null;
+                }
+                
+                $userData['company_id'] = (string)$company_id;
+                $userData['username'] = $username ?? $userData['username'] ?? 'system';
+                $userData['user_id'] = $authData->id ?? $authData['id'] ?? $authData->sub ?? $authData['sub'] ?? $userData['user_id'] ?? 0;
+                
+                // If we now have a user_id but full_name wasn't fetched, fetch it now
+                if (!empty($userData['user_id']) && (empty($userData['full_name']) || $userData['full_name'] === 'Unknown')) {
+                    try {
+                        $usersTable = TableRegistry::getTableLocator()->get('Users', [
+                            'connection' => ConnectionManager::get('default')
+                        ]);
+                        
+                        $user = $usersTable->find()
+                            ->select(['first_name', 'last_name'])
+                            ->where(['id' => $userData['user_id']])
+                            ->first();
+                        
+                        if ($user) {
+                            $firstName = $user->first_name ?? '';
+                            $lastName = $user->last_name ?? '';
+                            $fullName = trim($firstName . ' ' . $lastName);
+                            if (!empty($fullName)) {
+                                $userData['full_name'] = $fullName;
+                                $userData['employee_name'] = $fullName;
+                            }
+                        }
+                    } catch (\Exception $e) {
+                        Log::error('Error fetching user full name in controller: ' . $e->getMessage());
+                    }
+                }
+                
+                // Ensure full_name is preserved (don't overwrite it if it was already fetched)
+                if (empty($userData['full_name']) && !empty($userData['employee_name'])) {
+                    $userData['full_name'] = $userData['employee_name'];
+                }
+                
+                Log::debug('🔍 DEBUG: deleteScorecard - Audit logging data', [
+                    'scorecard_unique_id' => $scorecard_unique_id,
+                    'scorecard_name' => $scorecardName,
+                    'user_data' => $userData,
+                    'user_data_keys' => array_keys($userData),
+                    'full_name' => $userData['full_name'] ?? 'NOT_SET',
+                    'employee_name' => $userData['employee_name'] ?? 'NOT_SET',
+                    'username' => $userData['username'] ?? 'NOT_SET',
+                    'user_id' => $userData['user_id'] ?? 'NOT_SET'
+                ]);
+                
+                try {
                 AuditHelper::logScorecardAction(
                     'DELETE',
                     $scorecard_unique_id,
@@ -772,6 +884,11 @@ class ScorecardsController extends ApiController
                     $userData,
                     $this->request
                 );
+                } catch (\Exception $e) {
+                    Log::error('Exception in audit logging: ' . $e->getMessage(), [
+                        'trace' => $e->getTraceAsString()
+                    ]);
+                }
                 
                 return $this->response
                     ->withType('application/json')
@@ -2029,7 +2146,13 @@ class ScorecardsController extends ApiController
             $ScorecardTemplateAnswersTable = $this->getTable('ScorecardTemplateAnswers', $companyId);
 
             // Get all scorecards assigned to current user (both parent and child scorecards)
+            // Use select() to explicitly specify columns to avoid schema issues with parent_scorecard_id
             $assignedScorecards = $ScorecardTemplateAnswersTable->find()
+                ->select([
+                    'id', 'company_id', 'scorecard_unique_id', 'template_id', 
+                    'assigned_employee_username', 'answers', 'created_by', 
+                    'deleted', 'created', 'modified', 'parent_scorecard_id'
+                ])
                 ->where([
                     'company_id' => $companyId,
                     'deleted' => 0,
@@ -2075,7 +2198,8 @@ class ScorecardsController extends ApiController
                 // Fallback: If no children found with new logic, try the original logic
                 // Get only top-level parent scorecards assigned to user
                 $parentScorecards = array_filter($assignedScorecards, function($scorecard) {
-                    return $scorecard['parent_scorecard_id'] === null;
+                    // Use isset() to safely check if parent_scorecard_id exists and is null
+                    return !isset($scorecard['parent_scorecard_id']) || $scorecard['parent_scorecard_id'] === null;
                 });
                 
                 if (empty($parentScorecards)) {
@@ -2279,13 +2403,18 @@ class ScorecardsController extends ApiController
                 ]));
 
         } catch (\Exception $e) {
-            Log::error('Error in getMyTeamScorecardsData: ' . $e->getMessage());
+            // Include error message in debug mode or CLI (test) mode for better debugging
+            $isDebugMode = Configure::read('debug') || php_sapi_name() === 'cli';
+            Log::error('Error in getMyTeamScorecardsData: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString()
+            ]);
             return $this->response
                 ->withStatus(500)
                 ->withType('application/json')
                 ->withStringBody(json_encode([
                     'success' => false,
-                    'message' => 'Error fetching team scorecards data: ' . $e->getMessage()
+                    'message' => 'Error fetching team scorecards data: ' . $e->getMessage(),
+                    'error' => $isDebugMode ? $e->getMessage() : null,
                 ]));
         }
     }
@@ -2912,12 +3041,61 @@ class ScorecardsController extends ApiController
 
             // Log audit action
             $userData = AuditHelper::extractUserData($authResult);
+            // Override company_id and username with the correct values from controller
+            $authData = $authResult->getData();
+            $username = null;
+            if ($authData instanceof \ArrayObject || is_array($authData)) {
+                $username = $authData['username'] ?? $authData['sub'] ?? null;
+            } elseif (is_object($authData)) {
+                $username = $authData->username ?? $authData->sub ?? null;
+            }
+            
+            $userData['company_id'] = (string)$companyId;
+            $userData['username'] = $username ?? $userData['username'] ?? 'system';
+            $userData['user_id'] = $authData->id ?? $authData['id'] ?? $authData->sub ?? $authData['sub'] ?? $userData['user_id'] ?? 0;
+            
+            // If we now have a user_id but full_name wasn't fetched, fetch it now
+            if (!empty($userData['user_id']) && (empty($userData['full_name']) || $userData['full_name'] === 'Unknown')) {
+                try {
+                    $usersTable = TableRegistry::getTableLocator()->get('Users', [
+                        'connection' => ConnectionManager::get('default')
+                    ]);
+                    
+                    $user = $usersTable->find()
+                        ->select(['first_name', 'last_name'])
+                        ->where(['id' => $userData['user_id']])
+                        ->first();
+                    
+                    if ($user) {
+                        $firstName = $user->first_name ?? '';
+                        $lastName = $user->last_name ?? '';
+                        $fullName = trim($firstName . ' ' . $lastName);
+                        if (!empty($fullName)) {
+                            $userData['full_name'] = $fullName;
+                            $userData['employee_name'] = $fullName;
+                        }
+                    }
+                } catch (\Exception $e) {
+                    Log::error('Error fetching user full name in controller: ' . $e->getMessage());
+                }
+            }
+            
+            // Ensure full_name is preserved (don't overwrite it if it was already fetched)
+            if (empty($userData['full_name']) && !empty($userData['employee_name'])) {
+                $userData['full_name'] = $userData['employee_name'];
+            }
+            
             $scorecardName = AuditHelper::extractScorecardCode($parsedAnswers);
             
             Log::debug('🔍 DEBUG: updateScorecard - Audit logging data', [
                 'scorecard_unique_id' => $scorecardUniqueId,
                 'scorecard_name' => $scorecardName,
                 'user_data' => $userData,
+                'user_data_keys' => array_keys($userData),
+                'full_name' => $userData['full_name'] ?? 'NOT_SET',
+                'employee_name' => $userData['employee_name'] ?? 'NOT_SET',
+                'username' => $userData['username'] ?? 'NOT_SET',
+                'user_id' => $userData['user_id'] ?? 'NOT_SET',
                 'parsed_answers' => $parsedAnswers,
                 'old_answers' => $oldAnswers
             ]);
@@ -2960,9 +3138,12 @@ class ScorecardsController extends ApiController
             
             Log::debug('🔍 DEBUG: updateScorecard - Field changes', [
                 'field_changes' => $fieldChanges,
+                'field_changes_count' => count($fieldChanges),
+                'field_changes_empty' => empty($fieldChanges),
                 'old_answers' => $oldAnswers
             ]);
             
+            try {
             AuditHelper::logScorecardAction(
                 'UPDATE',
                 $scorecardUniqueId,
@@ -2971,6 +3152,11 @@ class ScorecardsController extends ApiController
                 $this->request,
                 $fieldChanges
             );
+            } catch (\Exception $e) {
+                Log::error('Exception in audit logging: ' . $e->getMessage(), [
+                    'trace' => $e->getTraceAsString()
+                ]);
+            }
 
             return $this->response
                 ->withType('application/json')

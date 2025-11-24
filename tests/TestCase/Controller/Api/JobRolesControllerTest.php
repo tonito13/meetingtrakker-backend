@@ -117,7 +117,8 @@ class JobRolesControllerTest extends TestCase
         $this->assertGreaterThan(0, $userCount, 'Users fixture should be loaded');
         
         // Check if JobRoleTemplateAnswers fixture is loaded
-        $jobRoleAnswersTable = \Cake\ORM\TableRegistry::getTableLocator()->get('JobRoleTemplateAnswers');
+        $connection = \Cake\Datasource\ConnectionManager::get('test_client_200001');
+        $jobRoleAnswersTable = \Cake\ORM\TableRegistry::getTableLocator()->get('JobRoleTemplateAnswers', ['connection' => $connection]);
         $jobRoleCount = $jobRoleAnswersTable->find()->count();
         
         echo "\n=== JOB ROLE TEMPLATE ANSWERS COUNT: {$jobRoleCount} ===\n";
@@ -126,7 +127,7 @@ class JobRolesControllerTest extends TestCase
         $this->assertGreaterThan(0, $jobRoleCount, 'JobRoleTemplateAnswers fixture should be loaded');
         
         // Check if JobRoleTemplates fixture is loaded
-        $jobRoleTemplatesTable = \Cake\ORM\TableRegistry::getTableLocator()->get('JobRoleTemplates');
+        $jobRoleTemplatesTable = \Cake\ORM\TableRegistry::getTableLocator()->get('JobRoleTemplates', ['connection' => $connection]);
         $jobRoleTemplatesCount = $jobRoleTemplatesTable->find()->count();
         
         echo "\n=== JOB ROLE TEMPLATES COUNT: {$jobRoleTemplatesCount} ===\n";
@@ -135,7 +136,7 @@ class JobRolesControllerTest extends TestCase
         $this->assertGreaterThan(0, $jobRoleTemplatesCount, 'JobRoleTemplates fixture should be loaded');
         
         // Check if RoleLevels fixture is loaded
-        $roleLevelsTable = \Cake\ORM\TableRegistry::getTableLocator()->get('RoleLevels');
+        $roleLevelsTable = \Cake\ORM\TableRegistry::getTableLocator()->get('RoleLevels', ['connection' => $connection]);
         $roleLevelsCount = $roleLevelsTable->find()->count();
         
         echo "\n=== ROLE LEVELS COUNT: {$roleLevelsCount} ===\n";

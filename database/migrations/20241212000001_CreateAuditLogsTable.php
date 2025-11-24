@@ -113,6 +113,12 @@ class CreateAuditLogsTable extends AbstractMigration
             'comment' => 'Error message if status is error'
         ]);
         
+        $table->addColumn('user_data', 'jsonb', [
+            'default' => null,
+            'null' => true,
+            'comment' => 'Additional user information (employee_name, etc.)'
+        ]);
+        
         $table->addColumn('created', 'timestamp', [
             'default' => 'CURRENT_TIMESTAMP',
             'null' => false,

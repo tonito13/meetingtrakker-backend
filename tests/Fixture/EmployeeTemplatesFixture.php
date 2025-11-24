@@ -14,6 +14,14 @@ use Cake\TestSuite\Fixture\TestFixture;
 class EmployeeTemplatesFixture extends TestFixture
 {
     /**
+     * Connection name to use for this fixture
+     * Company-specific tables should use the company-specific test database
+     * 
+     * @var string
+     */
+    public string $connection = 'test_client_200001';
+
+    /**
      * Table name
      * 
      * @var string
@@ -29,7 +37,7 @@ class EmployeeTemplatesFixture extends TestFixture
         'id' => ['type' => 'integer', 'length' => null, 'unsigned' => false, 'null' => false, 'default' => null, 'comment' => '', 'precision' => null, 'autoIncrement' => true],
         'company_id' => ['type' => 'integer', 'length' => null, 'unsigned' => false, 'null' => false, 'default' => null, 'comment' => '', 'precision' => null],
         'name' => ['type' => 'string', 'length' => 150, 'null' => false, 'default' => null, 'comment' => '', 'precision' => null],
-        'structure' => ['type' => 'json', 'length' => null, 'null' => false, 'default' => null, 'comment' => '', 'precision' => null],
+        'structure' => ['type' => 'jsonb', 'length' => null, 'null' => false, 'default' => null, 'comment' => '', 'precision' => null],
         'deleted' => ['type' => 'boolean', 'length' => null, 'null' => false, 'default' => false, 'comment' => '', 'precision' => null],
         'created_by' => ['type' => 'string', 'length' => 150, 'null' => false, 'default' => null, 'comment' => '', 'precision' => null],
         'created' => ['type' => 'datetime', 'length' => null, 'null' => true, 'default' => 'CURRENT_TIMESTAMP', 'comment' => '', 'precision' => null],
@@ -54,84 +62,97 @@ class EmployeeTemplatesFixture extends TestFixture
             [
                 'id' => 1001,
                 'company_id' => 200001,
-                'name' => 'Standard Employee Template',
+                'name' => 'employee',
                 'created_by' => 'admin',
                 'structure' => json_encode([
                     [
                         'id' => 'personal_info',
-                        'title' => 'Personal Information',
+                        'label' => 'Personal Information',
+                        'customize_group_label' => 'Personal Information',
                         'fields' => [
                             [
                                 'id' => 'employee_id',
+                                'label' => 'Employee ID',
                                 'customize_field_label' => 'Employee ID',
-                                'field_type' => 'text',
-                                'required' => true
+                                'type' => 'text',
+                                'is_required' => true
                             ],
                             [
                                 'id' => 'username',
+                                'label' => 'Username',
                                 'customize_field_label' => 'Username',
-                                'field_type' => 'text',
-                                'required' => true
+                                'type' => 'text',
+                                'is_required' => true
                             ],
                             [
                                 'id' => 'password',
+                                'label' => 'Password',
                                 'customize_field_label' => 'Password',
-                                'field_type' => 'password',
-                                'required' => true
+                                'type' => 'password',
+                                'is_required' => true
                             ],
                             [
                                 'id' => 'blood_type',
+                                'label' => 'Blood Type',
                                 'customize_field_label' => 'Blood Type',
-                                'field_type' => 'text',
-                                'required' => false
+                                'type' => 'text',
+                                'is_required' => false
                             ],
                             [
                                 'id' => 'first_name',
+                                'label' => 'First Name',
                                 'customize_field_label' => 'First Name',
-                                'field_type' => 'text',
-                                'required' => true
+                                'type' => 'text',
+                                'is_required' => true
                             ],
                             [
                                 'id' => 'last_name',
+                                'label' => 'Last Name',
                                 'customize_field_label' => 'Last Name',
-                                'field_type' => 'text',
-                                'required' => true
+                                'type' => 'text',
+                                'is_required' => true
                             ],
                             [
                                 'id' => 'email',
+                                'label' => 'Email Address',
                                 'customize_field_label' => 'Email Address',
-                                'field_type' => 'email',
-                                'required' => true
+                                'type' => 'email',
+                                'is_required' => true
                             ],
                             [
                                 'id' => 'phone',
+                                'label' => 'Phone Number',
                                 'customize_field_label' => 'Phone Number',
-                                'field_type' => 'text',
-                                'required' => false
+                                'type' => 'text',
+                                'is_required' => false
                             ]
                         ]
                     ],
                     [
                         'id' => 'job_info',
-                        'title' => 'Job Information',
+                        'label' => 'Job Information',
+                        'customize_group_label' => 'Job Information',
                         'fields' => [
                             [
                                 'id' => 'position',
+                                'label' => 'Position',
                                 'customize_field_label' => 'Position',
-                                'field_type' => 'text',
-                                'required' => true
+                                'type' => 'text',
+                                'is_required' => true
                             ],
                             [
                                 'id' => 'department',
+                                'label' => 'Department',
                                 'customize_field_label' => 'Department',
-                                'field_type' => 'text',
-                                'required' => true
+                                'type' => 'text',
+                                'is_required' => true
                             ],
                             [
                                 'id' => 'manager',
+                                'label' => 'Manager',
                                 'customize_field_label' => 'Manager',
-                                'field_type' => 'text',
-                                'required' => false
+                                'type' => 'text',
+                                'is_required' => false
                             ]
                         ]
                     ]
@@ -148,67 +169,78 @@ class EmployeeTemplatesFixture extends TestFixture
                 'structure' => json_encode([
                     [
                         'id' => 'personal_info',
-                        'title' => 'Personal Information',
+                        'label' => 'Personal Information',
+                        'customize_group_label' => 'Personal Information',
                         'fields' => [
                             [
                                 'id' => 'employee_id',
+                                'label' => 'Employee ID',
                                 'customize_field_label' => 'Employee ID',
-                                'field_type' => 'text',
-                                'required' => true
+                                'type' => 'text',
+                                'is_required' => true
                             ],
                             [
                                 'id' => 'username',
+                                'label' => 'Username',
                                 'customize_field_label' => 'Username',
-                                'field_type' => 'text',
-                                'required' => true
+                                'type' => 'text',
+                                'is_required' => true
                             ],
                             [
                                 'id' => 'password',
+                                'label' => 'Password',
                                 'customize_field_label' => 'Password',
-                                'field_type' => 'password',
-                                'required' => true
+                                'type' => 'password',
+                                'is_required' => true
                             ],
                             [
                                 'id' => 'blood_type',
+                                'label' => 'Blood Type',
                                 'customize_field_label' => 'Blood Type',
-                                'field_type' => 'text',
-                                'required' => false
+                                'type' => 'text',
+                                'is_required' => false
                             ],
                             [
                                 'id' => 'first_name',
+                                'label' => 'First Name',
                                 'customize_field_label' => 'First Name',
-                                'field_type' => 'text',
-                                'required' => true
+                                'type' => 'text',
+                                'is_required' => true
                             ],
                             [
                                 'id' => 'last_name',
+                                'label' => 'Last Name',
                                 'customize_field_label' => 'Last Name',
-                                'field_type' => 'text',
-                                'required' => true
+                                'type' => 'text',
+                                'is_required' => true
                             ],
                             [
                                 'id' => 'email',
+                                'label' => 'Email Address',
                                 'customize_field_label' => 'Email Address',
-                                'field_type' => 'email',
-                                'required' => true
+                                'type' => 'email',
+                                'is_required' => true
                             ]
                         ]
                     ],
                     [
                         'id' => 'job_info',
-                        'title' => 'Job Information',
+                        'label' => 'Job Information',
+                        'customize_group_label' => 'Job Information',
                         'fields' => [
                             [
                                 'id' => 'position',
+                                'label' => 'Position',
                                 'customize_field_label' => 'Position',
-                                'field_type' => 'text',
-                                'required' => true
+                                'type' => 'text',
+                                'is_required' => true
                             ],
                             [
                                 'id' => 'department',
+                                'label' => 'Department',
                                 'customize_field_label' => 'Department',
-                                'field_type' => 'text',
-                                'required' => true
+                                'type' => 'text',
+                                'is_required' => true
                             ]
                         ]
                     ]

@@ -9,6 +9,8 @@ use App\Helper\AuditHelper;
 use Cake\Core\Configure;
 use Cake\Log\Log;
 use Cake\Utility\Text;
+use Cake\Datasource\ConnectionManager;
+use Cake\ORM\TableRegistry;
 
 
 class JobRolesController extends ApiController
@@ -92,15 +94,70 @@ class JobRolesController extends ApiController
             if ($JobRoleTemplateAnswersTable->save($entity)) {
                 // Log audit action
                 $userData = AuditHelper::extractUserData($authResult);
-                $jobRoleName = AuditHelper::extractJobRoleName($answers);
+                // Override company_id and username with the correct values from controller
+                $authData = $authResult->getData();
+                $username = null;
+                if ($authData instanceof \ArrayObject || is_array($authData)) {
+                    $username = $authData['username'] ?? $authData['sub'] ?? null;
+                } elseif (is_object($authData)) {
+                    $username = $authData->username ?? $authData->sub ?? null;
+                }
+                
+                $userData['company_id'] = (string)$companyId;
+                $userData['username'] = $username ?? $userData['username'] ?? 'system';
+                $userData['user_id'] = $authData->id ?? $authData['id'] ?? $authData->sub ?? $authData['sub'] ?? $userData['user_id'] ?? 0;
+                
+                // If we now have a user_id but full_name wasn't fetched, fetch it now
+                if (!empty($userData['user_id']) && (empty($userData['full_name']) || $userData['full_name'] === 'Unknown')) {
+                    try {
+                        $usersTable = TableRegistry::getTableLocator()->get('Users', [
+                            'connection' => ConnectionManager::get('default')
+                        ]);
+                        
+                        $user = $usersTable->find()
+                            ->select(['first_name', 'last_name'])
+                            ->where(['id' => $userData['user_id']])
+                            ->first();
+                        
+                        if ($user) {
+                            $firstName = $user->first_name ?? '';
+                            $lastName = $user->last_name ?? '';
+                            $fullName = trim($firstName . ' ' . $lastName);
+                            if (!empty($fullName)) {
+                                $userData['full_name'] = $fullName;
+                                $userData['employee_name'] = $fullName;
+                            }
+                        }
+                    } catch (\Exception $e) {
+                        Log::error('Error fetching user full name in controller: ' . $e->getMessage());
+                    }
+                }
+                
+                // Ensure full_name is preserved (don't overwrite it if it was already fetched)
+                if (empty($userData['full_name']) && !empty($userData['employee_name'])) {
+                    $userData['full_name'] = $userData['employee_name'];
+                }
+                
+                // Get template structure for extracting Official Designation
+                $templateStructure = is_string($template->structure) 
+                    ? json_decode($template->structure, true) 
+                    : ($template->structure ?? []);
+                
+                $jobRoleName = AuditHelper::extractJobRoleName($answers, $templateStructure);
                 
                 Log::debug('🔍 DEBUG: addJobRole - Audit logging data', [
                     'job_role_unique_id' => $entity->job_role_unique_id,
                     'job_role_name' => $jobRoleName,
                     'user_data' => $userData,
+                    'user_data_keys' => array_keys($userData),
+                    'full_name' => $userData['full_name'] ?? 'NOT_SET',
+                    'employee_name' => $userData['employee_name'] ?? 'NOT_SET',
+                    'username' => $userData['username'] ?? 'NOT_SET',
+                    'user_id' => $userData['user_id'] ?? 'NOT_SET',
                     'answers' => $answers
                 ]);
                 
+                try {
                 AuditHelper::logJobRoleAction(
                     'CREATE',
                     $entity->job_role_unique_id,
@@ -108,6 +165,11 @@ class JobRolesController extends ApiController
                     $userData,
                     $this->request
                 );
+                } catch (\Exception $e) {
+                    Log::error('Exception in audit logging: ' . $e->getMessage(), [
+                        'trace' => $e->getTraceAsString()
+                    ]);
+                }
 
                 return $this->response
                     ->withType('application/json')
@@ -756,12 +818,74 @@ class JobRolesController extends ApiController
 
             // Log audit action with field change tracking
             $userData = AuditHelper::extractUserData($authResult);
-            $jobRoleName = AuditHelper::extractJobRoleName($answers);
+            // Override company_id and username with the correct values from controller
+            $authData = $authResult->getData();
+            $username = null;
+            if ($authData instanceof \ArrayObject || is_array($authData)) {
+                $username = $authData['username'] ?? $authData['sub'] ?? null;
+            } elseif (is_object($authData)) {
+                $username = $authData->username ?? $authData->sub ?? null;
+            }
+            
+            $userData['company_id'] = (string)$companyId;
+            $userData['username'] = $username ?? $userData['username'] ?? 'system';
+            $userData['user_id'] = $authData->id ?? $authData['id'] ?? $authData->sub ?? $authData['sub'] ?? $userData['user_id'] ?? 0;
+            
+            // If we now have a user_id but full_name wasn't fetched, fetch it now
+            if (!empty($userData['user_id']) && (empty($userData['full_name']) || $userData['full_name'] === 'Unknown')) {
+                try {
+                    $usersTable = TableRegistry::getTableLocator()->get('Users', [
+                        'connection' => ConnectionManager::get('default')
+                    ]);
+                    
+                    $user = $usersTable->find()
+                        ->select(['first_name', 'last_name'])
+                        ->where(['id' => $userData['user_id']])
+                        ->first();
+                    
+                    if ($user) {
+                        $firstName = $user->first_name ?? '';
+                        $lastName = $user->last_name ?? '';
+                        $fullName = trim($firstName . ' ' . $lastName);
+                        if (!empty($fullName)) {
+                            $userData['full_name'] = $fullName;
+                            $userData['employee_name'] = $fullName;
+                        }
+                    }
+                } catch (\Exception $e) {
+                    Log::error('Error fetching user full name in controller: ' . $e->getMessage());
+                }
+            }
+            
+            // Ensure full_name is preserved (don't overwrite it if it was already fetched)
+            if (empty($userData['full_name']) && !empty($userData['employee_name'])) {
+                $userData['full_name'] = $userData['employee_name'];
+            }
+            
+            // Get template structure for extracting Official Designation
+            $JobRoleTemplatesTable = $this->getTable('JobRoleTemplates', $companyId);
+            $template = $JobRoleTemplatesTable->find()
+                ->where(['id' => $templateId, 'company_id' => $companyId, 'deleted' => 0])
+                ->first();
+            
+            $templateStructure = [];
+            if ($template) {
+                $templateStructure = is_string($template->structure) 
+                    ? json_decode($template->structure, true) 
+                    : ($template->structure ?? []);
+            }
+            
+            $jobRoleName = AuditHelper::extractJobRoleName($answers, $templateStructure);
             
             Log::debug('🔍 DEBUG: editJobRole - Audit logging data', [
                 'job_role_unique_id' => $job_role_unique_id,
                 'job_role_name' => $jobRoleName,
                 'user_data' => $userData,
+                'user_data_keys' => array_keys($userData),
+                'full_name' => $userData['full_name'] ?? 'NOT_SET',
+                'employee_name' => $userData['employee_name'] ?? 'NOT_SET',
+                'username' => $userData['username'] ?? 'NOT_SET',
+                'user_id' => $userData['user_id'] ?? 'NOT_SET',
                 'answers' => $answers
             ]);
             
@@ -803,6 +927,7 @@ class JobRolesController extends ApiController
                 'field_changes_count' => count($fieldChanges)
             ]);
             
+            try {
             AuditHelper::logJobRoleAction(
                 'UPDATE',
                 $job_role_unique_id,
@@ -811,6 +936,11 @@ class JobRolesController extends ApiController
                 $this->request,
                 $fieldChanges
             );
+            } catch (\Exception $e) {
+                Log::error('Exception in audit logging: ' . $e->getMessage(), [
+                    'trace' => $e->getTraceAsString()
+                ]);
+            }
 
             return $this->response
                 ->withStatus(200)
@@ -905,6 +1035,63 @@ class JobRolesController extends ApiController
 
             // Log audit action
             $userData = AuditHelper::extractUserData($authResult);
+            // Override company_id and username with the correct values from controller
+            $authData = $authResult->getData();
+            $username = null;
+            if ($authData instanceof \ArrayObject || is_array($authData)) {
+                $username = $authData['username'] ?? $authData['sub'] ?? null;
+            } elseif (is_object($authData)) {
+                $username = $authData->username ?? $authData->sub ?? null;
+            }
+            
+            $userData['company_id'] = (string)$companyId;
+            $userData['username'] = $username ?? $userData['username'] ?? 'system';
+            $userData['user_id'] = $authData->id ?? $authData['id'] ?? $authData->sub ?? $authData['sub'] ?? $userData['user_id'] ?? 0;
+            
+            // If we now have a user_id but full_name wasn't fetched, fetch it now
+            if (!empty($userData['user_id']) && (empty($userData['full_name']) || $userData['full_name'] === 'Unknown')) {
+                try {
+                    $usersTable = TableRegistry::getTableLocator()->get('Users', [
+                        'connection' => ConnectionManager::get('default')
+                    ]);
+                    
+                    $user = $usersTable->find()
+                        ->select(['first_name', 'last_name'])
+                        ->where(['id' => $userData['user_id']])
+                        ->first();
+                    
+                    if ($user) {
+                        $firstName = $user->first_name ?? '';
+                        $lastName = $user->last_name ?? '';
+                        $fullName = trim($firstName . ' ' . $lastName);
+                        if (!empty($fullName)) {
+                            $userData['full_name'] = $fullName;
+                            $userData['employee_name'] = $fullName;
+                        }
+                    }
+                } catch (\Exception $e) {
+                    Log::error('Error fetching user full name in controller: ' . $e->getMessage());
+                }
+            }
+            
+            // Ensure full_name is preserved (don't overwrite it if it was already fetched)
+            if (empty($userData['full_name']) && !empty($userData['employee_name'])) {
+                $userData['full_name'] = $userData['employee_name'];
+            }
+            
+            // Get template structure for extracting Official Designation
+            $JobRoleTemplatesTable = $this->getTable('JobRoleTemplates', $companyId);
+            $template = $JobRoleTemplatesTable->find()
+                ->where(['id' => $existing->template_id, 'company_id' => $companyId, 'deleted' => 0])
+                ->first();
+            
+            $templateStructure = [];
+            if ($template) {
+                $templateStructure = is_string($template->structure) 
+                    ? json_decode($template->structure, true) 
+                    : ($template->structure ?? []);
+            }
+            
             $jobRoleAnswers = $existing->answers;
             if (is_string($jobRoleAnswers)) {
                 $jobRoleAnswers = json_decode($jobRoleAnswers, true);
@@ -912,14 +1099,20 @@ class JobRolesController extends ApiController
             if (!is_array($jobRoleAnswers)) {
                 $jobRoleAnswers = [];
             }
-            $jobRoleName = AuditHelper::extractJobRoleName($jobRoleAnswers);
+            $jobRoleName = AuditHelper::extractJobRoleName($jobRoleAnswers, $templateStructure);
             
             Log::debug('🔍 DEBUG: deleteJobRole - Audit logging data', [
                 'job_role_unique_id' => $job_role_unique_id,
                 'job_role_name' => $jobRoleName,
-                'user_data' => $userData
+                'user_data' => $userData,
+                'user_data_keys' => array_keys($userData),
+                'full_name' => $userData['full_name'] ?? 'NOT_SET',
+                'employee_name' => $userData['employee_name'] ?? 'NOT_SET',
+                'username' => $userData['username'] ?? 'NOT_SET',
+                'user_id' => $userData['user_id'] ?? 'NOT_SET'
             ]);
             
+            try {
             AuditHelper::logJobRoleAction(
                 'DELETE',
                 $job_role_unique_id,
@@ -927,6 +1120,11 @@ class JobRolesController extends ApiController
                 $userData,
                 $this->request
             );
+            } catch (\Exception $e) {
+                Log::error('Exception in audit logging: ' . $e->getMessage(), [
+                    'trace' => $e->getTraceAsString()
+                ]);
+            }
 
             return $this->response
                 ->withStatus(200)

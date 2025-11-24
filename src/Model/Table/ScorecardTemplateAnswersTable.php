@@ -43,6 +43,18 @@ class ScorecardTemplateAnswersTable extends Table
         $this->setDisplayField('scorecard_unique_id');
         $this->setPrimaryKey('id');
 
+        // Explicitly define parent_scorecard_id in schema to ensure it's recognized
+        // This is necessary because CakePHP's schema introspection may not always detect all columns
+        $schema = $this->getSchema();
+        if (!$schema->hasColumn('parent_scorecard_id')) {
+            $schema->addColumn('parent_scorecard_id', [
+                'type' => 'integer',
+                'length' => null,
+                'null' => true,
+                'default' => null
+            ]);
+        }
+
         $this->addBehavior('Timestamp');
     }
 

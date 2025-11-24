@@ -14,6 +14,14 @@ use Cake\TestSuite\Fixture\TestFixture;
 class ScorecardTemplateAnswersFixture extends TestFixture
 {
     /**
+     * Connection name to use for this fixture
+     * Company-specific tables should use the company-specific test database
+     * 
+     * @var string
+     */
+    public string $connection = 'test_client_200001';
+
+    /**
      * Table name
      * 
      * @var string
@@ -31,6 +39,7 @@ class ScorecardTemplateAnswersFixture extends TestFixture
         'scorecard_unique_id' => ['type' => 'string', 'length' => 150, 'null' => false, 'default' => null, 'comment' => '', 'precision' => null],
         'template_id' => ['type' => 'integer', 'length' => null, 'unsigned' => false, 'null' => false, 'default' => null, 'comment' => '', 'precision' => null],
         'assigned_employee_username' => ['type' => 'string', 'length' => 100, 'null' => true, 'default' => null, 'comment' => '', 'precision' => null],
+        'parent_scorecard_id' => ['type' => 'integer', 'length' => null, 'unsigned' => false, 'null' => true, 'default' => null, 'comment' => '', 'precision' => null],
         'answers' => ['type' => 'text', 'length' => null, 'null' => false, 'default' => null, 'comment' => '', 'precision' => null],
         'created_by' => ['type' => 'string', 'length' => 150, 'null' => false, 'default' => null, 'comment' => '', 'precision' => null],
         'deleted' => ['type' => 'boolean', 'length' => null, 'null' => false, 'default' => false, 'comment' => '', 'precision' => null],
