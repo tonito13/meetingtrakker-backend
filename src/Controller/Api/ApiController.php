@@ -206,7 +206,29 @@ class ApiController extends Controller
             }
 
             $registry = TableRegistry::getTableLocator();
-            $registry->clear(); // Clear all loaded tables from the locator
+            // Remove the table from registry if it exists to avoid "already exists" errors
+            // This allows us to reconfigure it with the correct connection
+            // This prevents connection exhaustion while maintaining functionality
+            try {
+                if ($registry->exists($tableName)) {
+                    $registry->remove($tableName);
+                }
+            } catch (\Exception $e) {
+                // If removal fails, try to get existing table and check if connection matches
+                try {
+                    $existingTable = $registry->get($tableName);
+                    $existingConnection = $existingTable->getConnection();
+                    // If connections are the same, we can use the existing table
+                    if ($existingConnection === $connection) {
+                        return $existingTable;
+                    }
+                    // If different, force remove
+                    $registry->remove($tableName);
+                } catch (\Exception $e2) {
+                    // Table doesn't exist or can't be accessed, continue to create new one
+                }
+            }
+            
             $tableData = $registry->get($tableName, ['connection' => $connection]);
 
             return $tableData;

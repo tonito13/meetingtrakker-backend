@@ -104,6 +104,27 @@ class EmployeeAnswerFilesTable extends Table
             ->boolean('deleted')
             ->allowEmptyString('deleted');
 
+        // S3 fields validation
+        $validator
+            ->scalar('s3_bucket')
+            ->maxLength('s3_bucket', 255)
+            ->allowEmptyString('s3_bucket');
+
+        $validator
+            ->scalar('s3_key')
+            ->maxLength('s3_key', 500)
+            ->allowEmptyString('s3_key');
+
+        // Employee fields validation
+        $validator
+            ->scalar('employee_unique_id')
+            ->maxLength('employee_unique_id', 150)
+            ->allowEmptyString('employee_unique_id');
+
+        $validator
+            ->integer('employee_id')
+            ->allowEmptyString('employee_id');
+
         return $validator;
     }
 
@@ -120,4 +141,40 @@ class EmployeeAnswerFilesTable extends Table
 
     //     return $rules;
     // }
+
+    /**
+     * Find active files (not deleted)
+     *
+     * @param \Cake\ORM\Query\SelectQuery $query Query object
+     * @param array $options Options array
+     * @return \Cake\ORM\Query\SelectQuery
+     */
+    public function findActive(SelectQuery $query, array $options): SelectQuery
+    {
+        return $query->where(['EmployeeAnswerFiles.deleted' => false]);
+    }
+
+    /**
+     * Find files by employee
+     *
+     * @param \Cake\ORM\Query\SelectQuery $query Query object
+     * @param array $options Options array with 'employee_unique_id' key
+     * @return \Cake\ORM\Query\SelectQuery
+     */
+    public function findByEmployee(SelectQuery $query, array $options): SelectQuery
+    {
+        return $query->where(['EmployeeAnswerFiles.employee_unique_id' => $options['employee_unique_id']]);
+    }
+
+    /**
+     * Find files by field
+     *
+     * @param \Cake\ORM\Query\SelectQuery $query Query object
+     * @param array $options Options array with 'field_id' key
+     * @return \Cake\ORM\Query\SelectQuery
+     */
+    public function findByField(SelectQuery $query, array $options): SelectQuery
+    {
+        return $query->where(['EmployeeAnswerFiles.field_id' => $options['field_id']]);
+    }
 }

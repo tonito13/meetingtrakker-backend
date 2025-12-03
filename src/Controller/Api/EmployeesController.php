@@ -7,6 +7,7 @@ namespace App\Controller\Api;
 use App\Controller\Api\ApiController;
 use App\Helper\AuditHelper;
 use App\Service\CompanyMappingService;
+use App\Service\S3FileService;
 use Cake\Core\Configure;
 use Cake\Utility\Text;
 use Exception;
@@ -18,10 +19,24 @@ use Cake\ORM\TableRegistry;
 class EmployeesController extends ApiController
 {
     private ?CompanyMappingService $companyMappingService = null;
+    private ?S3FileService $s3Service = null;
 
     public function initialize(): void
     {
         parent::initialize();
+    }
+
+    /**
+     * Get S3FileService instance
+     *
+     * @return S3FileService
+     */
+    private function getS3Service(): S3FileService
+    {
+        if ($this->s3Service === null) {
+            $this->s3Service = new S3FileService();
+        }
+        return $this->s3Service;
     }
 
     /**
@@ -428,33 +443,76 @@ class EmployeesController extends ApiController
             $EmployeeTemplateAnswersTable = $this->getTable('EmployeeTemplateAnswers', $companyId);
             $EmployeeAnswerFilesTable = $this->getTable('EmployeeAnswerFiles', $companyId);
 
+            // Ensure schemas are loaded before any operations
+            // This prevents "Cannot describe table. It has 0 columns" errors
+            try {
+                $EmployeeTemplateAnswersTable->getSchema();
+                $EmployeeAnswerFilesTable->getSchema();
+            } catch (\Exception $schemaError) {
+                Log::error('Schema loading error in uploadFiles: ' . $schemaError->getMessage());
+                // Re-get tables to force schema reload
+                $EmployeeTemplateAnswersTable = $this->getTable('EmployeeTemplateAnswers', $companyId);
+                $EmployeeAnswerFilesTable = $this->getTable('EmployeeAnswerFiles', $companyId);
+            }
+
             // Start transaction
             $connection = $EmployeeTemplateAnswersTable->getConnection();
             $connection->begin();
 
-            // Validate answer_id exists
-            $answer = $EmployeeTemplateAnswersTable
-                ->find()
-                ->where([
+            // Validate answer_id exists - use direct SQL query to avoid schema issues
+            $answerResult = $connection->execute(
+                'SELECT id, template_id, answers, employee_unique_id FROM employee_template_answers WHERE id = :id AND company_id = :company_id AND employee_unique_id = :employee_unique_id AND deleted = false',
+                [
                     'id' => $answerId,
                     'company_id' => $companyId,
-                    'employee_unique_id' => $employeeUniqueId,
-                    'deleted' => 0,
-                ])
-                ->first();
-            if (!$answer) {
+                    'employee_unique_id' => $employeeUniqueId
+                ]
+            )->fetch('assoc');
+            
+            if (!$answerResult) {
                 throw new Exception('Invalid answer ID or employee unique ID.');
             }
+            
+            // Create a simple object to hold answer data
+            $answer = (object)[
+                'id' => $answerResult['id'],
+                'template_id' => $answerResult['template_id'],
+                'employee_unique_id' => $answerResult['employee_unique_id'],
+                'answers' => is_string($answerResult['answers']) ? json_decode($answerResult['answers'], true) : $answerResult['answers']
+            ];
 
             // Get template to validate required file fields
             $template = $this->validateTemplate($companyId, $answer->template_id);
-            $requiredFileFields = $this->getRequiredFileFields($template->structure);
+            $templateStructure = is_string($template->structure) ? json_decode($template->structure, true) : $template->structure;
+            $requiredFileFields = $this->getRequiredFileFields($templateStructure);
 
             $files = $this->request->getUploadedFiles();
             $fileMap = [];
             $uploadedFields = [];
 
             $targetFiles = isset($files['files']) && is_array($files['files']) ? $files['files'] : $files;
+
+            // Get employee ID if available (Employees table may not exist in all Scorecardtrakker setups)
+            $employeeId = null;
+            try {
+                $employeesTable = $this->getTable('Employees', $companyId);
+                $employee = $employeesTable->find()
+                    ->where([
+                        'Employees.employee_unique_id' => $employeeUniqueId,
+                        'Employees.company_id' => $companyId,
+                        'Employees.deleted' => false
+                    ])
+                    ->first();
+                
+                if ($employee) {
+                    $employeeId = $employee->id;
+                }
+            } catch (\Exception $e) {
+                // Employees table may not exist, continue without employee_id
+                // employee_unique_id is sufficient for S3 folder structure
+            }
+
+            $s3Service = $this->getS3Service();
 
             foreach ($targetFiles as $key => $file) {
                 if (preg_match('/^(\d+)_([0-9_]+)$/', $key, $matches)) {
@@ -463,41 +521,99 @@ class EmployeesController extends ApiController
                     $this->validateFile($file, "File for {$groupId}_{$fieldId}");
 
                     $fileName = $file->getClientFilename();
-                    $file_name =  $companyId . DS . $employeeUniqueId . DS . $fieldId . '_' . $fileName;
-                    $filePath = WWW_ROOT . 'Uploads' . DS . $file_name;
-                    $fileDir = dirname($filePath);
-
-                    if (!file_exists($fileDir) && !mkdir($fileDir, 0777, true)) {
-                        throw new Exception("Failed to create directory for file upload: {$fieldId}");
+                    
+                    // Check if there's an existing file for this field and soft delete it
+                    // Use direct SQL to avoid schema description issues
+                    // Note: deleted is a boolean in PostgreSQL, so use false instead of 0
+                    $existingFileResult = $connection->execute(
+                        'SELECT id, s3_bucket, s3_key FROM employee_answer_files WHERE answer_id = :answer_id AND employee_unique_id = :employee_unique_id AND field_id = :field_id AND company_id = :company_id AND deleted = false',
+                        [
+                            'answer_id' => $answerId,
+                            'employee_unique_id' => $employeeUniqueId,
+                            'field_id' => $fieldId,
+                            'company_id' => $companyId
+                        ]
+                    )->fetch('assoc');
+                    
+                    if ($existingFileResult) {
+                        // Soft delete the existing file using direct SQL
+                        $connection->execute(
+                            'UPDATE employee_answer_files SET deleted = true WHERE id = :id',
+                            ['id' => $existingFileResult['id']]
+                        );
+                        
+                        // Also delete the file from S3 if it exists
+                        if (!empty($existingFileResult['s3_bucket']) && !empty($existingFileResult['s3_key'])) {
+                            $s3Service->deleteFile($existingFileResult['s3_bucket'], $existingFileResult['s3_key']);
+                        }
                     }
 
-                    $file->moveTo($filePath);
-                    if (!file_exists($filePath)) {
-                        throw new Exception("Failed to upload file for {$fieldId}.");
+                    // Generate unique filename using the same convention as Skiltrakker
+                    $fileExtension = pathinfo($fileName, PATHINFO_EXTENSION);
+                    $baseFileName = pathinfo($fileName, PATHINFO_FILENAME);
+                    $microtime = microtime(true);
+                    $randomSuffix = mt_rand(1000, 9999);
+                    $uniqueFileName = $baseFileName . '_' . number_format($microtime, 4, '', '') . '_' . $randomSuffix . '.' . $fileExtension;
+
+                    // Read file content from uploaded file
+                    $fileStream = $file->getStream();
+                    $fileContent = $fileStream->getContents();
+                    
+                    if ($fileContent === false) {
+                        throw new Exception("Failed to read file content for {$fieldId}.");
                     }
 
-                    $fileEntity = $EmployeeAnswerFilesTable->newEntity([
-                        'answer_id' => $answerId,
-                        'file_name' => $fileName,
-                        'file_path' => 'Uploads/' . $file_name,
-                        'file_type' => $file->getClientMediaType(),
-                        'file_size' => $file->getSize(),
-                        'group_id' => $groupId,
-                        'field_id' => $fieldId,
-                        'company_id' => $companyId,
-                        'deleted' => 0,
-                        'created' => date('Y-m-d H:i:s'),
-                        'modified' => date('Y-m-d H:i:s'),
-                    ]);
+                    // Upload to S3 with proper folder structure: scorecardtrakker/employees/{companyId}/{employeeUniqueId}/{fieldId}/{filename}
+                    $s3Result = $s3Service->uploadFile(
+                        $fileContent,
+                        $uniqueFileName,
+                        $companyId,
+                        'employees',
+                        null, // companyName - not needed
+                        null, // employeeName - not needed
+                        null, // No intervention unique ID for employee files
+                        null, // No competency name for employee files
+                        null, // No level name for employee files
+                        $employeeUniqueId, // employeeUniqueId - required for folder structure
+                        $fieldId // fieldId - required for folder structure
+                    );
 
-                    if (!$EmployeeAnswerFilesTable->save($fileEntity)) {
+                    if (!$s3Result['success']) {
+                        throw new Exception("Failed to upload file to S3 for {$fieldId}: " . ($s3Result['error'] ?? 'Unknown error'));
+                    }
+
+                    // Use direct SQL insert to avoid schema description issues
+                    // Note: deleted is a boolean in PostgreSQL, so use false instead of 0
+                    $insertResult = $connection->execute(
+                        'INSERT INTO employee_answer_files (answer_id, employee_id, employee_unique_id, file_name, file_path, file_type, file_size, group_id, field_id, company_id, s3_bucket, s3_key, deleted, created, modified) 
+                         VALUES (:answer_id, :employee_id, :employee_unique_id, :file_name, :file_path, :file_type, :file_size, :group_id, :field_id, :company_id, :s3_bucket, :s3_key, false, NOW(), NOW())',
+                        [
+                            'answer_id' => $answerId,
+                            'employee_id' => $employeeId,
+                            'employee_unique_id' => $employeeUniqueId,
+                            'file_name' => $fileName,
+                            'file_path' => $uniqueFileName,
+                            'file_type' => $file->getClientMediaType(),
+                            'file_size' => $file->getSize(),
+                            'group_id' => $groupId,
+                            'field_id' => $fieldId,
+                            'company_id' => $companyId,
+                            's3_bucket' => $s3Result['bucket'],
+                            's3_key' => $s3Result['key']
+                        ]
+                    );
+                    
+                    if ($insertResult->rowCount() === 0) {
+                        // Clean up S3 file if database save failed
+                        $s3Service->deleteFile($s3Result['bucket'], $s3Result['key']);
                         throw new Exception("Failed to save file metadata for {$fieldId}.");
                     }
 
                     if (!isset($fileMap[$groupId])) {
                         $fileMap[$groupId] = [];
                     }
-                    $fileMap[$groupId][$fieldId] = $filePath;
+                    // Store unique filename in fileMap (not full path)
+                    $fileMap[$groupId][$fieldId] = $uniqueFileName;
                     $uploadedFields[] = "{$groupId}_{$fieldId}";
                 }
             }
@@ -509,19 +625,42 @@ class EmployeesController extends ApiController
                 }
             }
 
-            // Update answers with file paths
-            $answerData = $answer->answers;
+            // Update answers with file identifiers (unique filenames)
+            // Ensure answers is an array (handle JSONB/JSON type)
+            $answerData = is_array($answer->answers) ? $answer->answers : (is_string($answer->answers) ? json_decode($answer->answers, true) : []);
+            
+            if (!is_array($answerData)) {
+                $answerData = [];
+            }
+            
             foreach ($fileMap as $groupId => $fields) {
-                foreach ($fields as $fieldId => $filePath) {
+                foreach ($fields as $fieldId => $uniqueFileName) {
                     if (!isset($answerData[$groupId])) {
                         $answerData[$groupId] = [];
                     }
-                    $answerData[$groupId][$fieldId] = $filePath;
+                    // Store unique filename as identifier (frontend will use API endpoints or presigned URLs)
+                    $answerData[$groupId][$fieldId] = $uniqueFileName;
                 }
             }
-            $answer->answers = $answerData;
-            if (!$EmployeeTemplateAnswersTable->save($answer)) {
-                throw new Exception('Failed to update employee answers with file paths.');
+            
+            // Use direct SQL update to avoid schema description issues
+            // This bypasses CakePHP's entity save which requires schema description
+            // Note: deleted is a boolean in PostgreSQL, so use false instead of 0
+            $connection = $EmployeeTemplateAnswersTable->getConnection();
+            $answersJson = json_encode($answerData, JSON_UNESCAPED_UNICODE);
+            
+            $updateResult = $connection->execute(
+                'UPDATE employee_template_answers SET answers = :answers::jsonb, modified = NOW() WHERE id = :id AND company_id = :company_id AND employee_unique_id = :employee_unique_id AND deleted = false',
+                [
+                    'answers' => $answersJson,
+                    'id' => $answerId,
+                    'company_id' => $companyId,
+                    'employee_unique_id' => $employeeUniqueId
+                ]
+            );
+            
+            if ($updateResult->rowCount() === 0) {
+                throw new Exception('Failed to update employee answers with file paths. No rows updated.');
             }
 
             // Commit transaction
@@ -2180,10 +2319,13 @@ class EmployeesController extends ApiController
 
             // Fetch attached files and merge into answers
             $get_employee_attached = $EmployeeAnswerFilesTable
-                ->find()
+                ->find('active')
                 ->select([
                     'answer_id' => 'answer_id',
                     'file_path' => 'file_path',
+                    'file_name' => 'file_name',
+                    's3_bucket' => 's3_bucket',
+                    's3_key' => 's3_key',
                     'group_id' => 'group_id',
                     'field_id' => 'field_id',
                 ])
@@ -2205,13 +2347,28 @@ class EmployeesController extends ApiController
                 ])
                 ->toArray();
 
+            // Generate presigned URLs for S3 files
+            $s3Service = $this->getS3Service();
             foreach ($get_employee_attached as $file) {
                 $group_id = $file['group_id'];
                 $field_id = $file['field_id'];
                 if (!isset($answers[$group_id])) {
                     $answers[$group_id] = [];
                 }
-                $answers[$group_id][$field_id] = $file['file_path'];
+                
+                // If file is in S3, generate presigned URL; otherwise use file_path (backward compatibility)
+                if (!empty($file['s3_bucket']) && !empty($file['s3_key'])) {
+                    $presignedUrl = $s3Service->generatePresignedUrl(
+                        $file['s3_bucket'],
+                        $file['s3_key'],
+                        3600 // 1 hour expiry
+                    );
+                    // Store presigned URL for S3 files
+                    $answers[$group_id][$field_id] = $presignedUrl ?: $file['file_path'];
+                } else {
+                    // Fallback to file_path for backward compatibility (local files)
+                    $answers[$group_id][$field_id] = $file['file_path'];
+                }
             }
 
             return $this->response
@@ -2888,10 +3045,13 @@ class EmployeesController extends ApiController
 
             // Fetch attached files
             $attachedFiles = $employeeAnswerFilesTable
-                ->find()
+                ->find('active')
                 ->select([
                     'answer_id',
                     'file_path',
+                    'file_name',
+                    's3_bucket',
+                    's3_key',
                     'group_id',
                     'field_id',
                 ])
@@ -2902,7 +3062,10 @@ class EmployeesController extends ApiController
                 ])
                 ->toArray();
 
-            // Merge file paths into answers, skipping Password fields
+            // Generate presigned URLs for S3 files
+            $s3Service = $this->getS3Service();
+            
+            // Merge file paths/presigned URLs into answers, skipping Password fields
             foreach ($attachedFiles as $file) {
                 $groupId = $file->group_id;
                 $fieldId = $file->field_id;
@@ -2917,7 +3080,20 @@ class EmployeesController extends ApiController
                     if (!isset($answers[$groupId])) {
                         $answers[$groupId] = [];
                     }
-                    $answers[$groupId][$fieldId] = $file->file_path;
+                    
+                    // If file is in S3, generate presigned URL; otherwise use file_path (backward compatibility)
+                    if (!empty($file->s3_bucket) && !empty($file->s3_key)) {
+                        $presignedUrl = $s3Service->generatePresignedUrl(
+                            $file->s3_bucket,
+                            $file->s3_key,
+                            3600 // 1 hour expiry
+                        );
+                        // Store presigned URL for S3 files
+                        $answers[$groupId][$fieldId] = $presignedUrl ?: $file->file_path;
+                    } else {
+                        // Fallback to file_path for backward compatibility (local files)
+                        $answers[$groupId][$fieldId] = $file->file_path;
+                    }
                 }
             }
 
@@ -3495,33 +3671,76 @@ class EmployeesController extends ApiController
             $EmployeeTemplateAnswersTable = $this->getTable('EmployeeTemplateAnswers', $companyId);
             $EmployeeAnswerFilesTable = $this->getTable('EmployeeAnswerFiles', $companyId);
 
+            // Ensure schemas are loaded before any operations
+            // This prevents "Cannot describe table. It has 0 columns" errors
+            try {
+                $EmployeeTemplateAnswersTable->getSchema();
+                $EmployeeAnswerFilesTable->getSchema();
+            } catch (\Exception $schemaError) {
+                Log::error('Schema loading error in uploadFiles: ' . $schemaError->getMessage());
+                // Re-get tables to force schema reload
+                $EmployeeTemplateAnswersTable = $this->getTable('EmployeeTemplateAnswers', $companyId);
+                $EmployeeAnswerFilesTable = $this->getTable('EmployeeAnswerFiles', $companyId);
+            }
+
             // Start transaction
             $connection = $EmployeeTemplateAnswersTable->getConnection();
             $connection->begin();
 
-            // Validate answer_id exists
-            $answer = $EmployeeTemplateAnswersTable
-                ->find()
-                ->where([
+            // Validate answer_id exists - use direct SQL query to avoid schema issues
+            $answerResult = $connection->execute(
+                'SELECT id, template_id, answers, employee_unique_id FROM employee_template_answers WHERE id = :id AND company_id = :company_id AND employee_unique_id = :employee_unique_id AND deleted = false',
+                [
                     'id' => $answerId,
                     'company_id' => $companyId,
-                    'employee_unique_id' => $employeeUniqueId,
-                    'deleted' => 0,
-                ])
-                ->first();
-            if (!$answer) {
+                    'employee_unique_id' => $employeeUniqueId
+                ]
+            )->fetch('assoc');
+            
+            if (!$answerResult) {
                 throw new Exception('Invalid answer ID or employee unique ID.');
             }
+            
+            // Create a simple object to hold answer data
+            $answer = (object)[
+                'id' => $answerResult['id'],
+                'template_id' => $answerResult['template_id'],
+                'employee_unique_id' => $answerResult['employee_unique_id'],
+                'answers' => is_string($answerResult['answers']) ? json_decode($answerResult['answers'], true) : $answerResult['answers']
+            ];
 
             // Get template to validate required file fields
             $template = $this->validateTemplate($companyId, $answer->template_id);
-            $requiredFileFields = $this->getRequiredFileFields($template->structure);
+            $templateStructure = is_string($template->structure) ? json_decode($template->structure, true) : $template->structure;
+            $requiredFileFields = $this->getRequiredFileFields($templateStructure);
 
             $files = $this->request->getUploadedFiles();
             $fileMap = [];
             $uploadedFields = [];
 
             $targetFiles = isset($files['files']) && is_array($files['files']) ? $files['files'] : $files;
+
+            // Get employee ID if available (Employees table may not exist in all Scorecardtrakker setups)
+            $employeeId = null;
+            try {
+                $employeesTable = $this->getTable('Employees', $companyId);
+                $employee = $employeesTable->find()
+                    ->where([
+                        'Employees.employee_unique_id' => $employeeUniqueId,
+                        'Employees.company_id' => $companyId,
+                        'Employees.deleted' => false
+                    ])
+                    ->first();
+                
+                if ($employee) {
+                    $employeeId = $employee->id;
+                }
+            } catch (\Exception $e) {
+                // Employees table may not exist, continue without employee_id
+                // employee_unique_id is sufficient for S3 folder structure
+            }
+
+            $s3Service = $this->getS3Service();
 
             // Process new or updated files
             foreach ($targetFiles as $key => $file) {
@@ -3531,62 +3750,119 @@ class EmployeesController extends ApiController
                     $this->validateFile($file, "File for {$groupId}_{$fieldId}");
 
                     $fileName = $file->getClientFilename();
-                    $file_name = $companyId . DS . $employeeUniqueId . DS . $fieldId . '_' . $fileName;
-                    $filePath = WWW_ROOT . 'Uploads' . DS . $file_name;
-                    $fileDir = dirname($filePath);
-
-                    if (!file_exists($fileDir) && !mkdir($fileDir, 0777, true)) {
-                        throw new Exception("Failed to create directory for file upload: {$fieldId}");
-                    }
-
-                    $file->moveTo($filePath);
-                    if (!file_exists($filePath)) {
-                        throw new Exception("Failed to upload file for {$fieldId}.");
-                    }
 
                     // Check if file already exists for this answer_id, group_id, and field_id
-                    $existingFile = $EmployeeAnswerFilesTable
-                        ->find()
-                        ->where([
+                    // Use direct SQL to avoid schema description issues
+                    // Note: deleted is a boolean in PostgreSQL, so use false instead of 0
+                    $existingFileResult = $connection->execute(
+                        'SELECT id, s3_bucket, s3_key FROM employee_answer_files WHERE answer_id = :answer_id AND employee_unique_id = :employee_unique_id AND group_id = :group_id AND field_id = :field_id AND company_id = :company_id AND deleted = false',
+                        [
                             'answer_id' => $answerId,
+                            'employee_unique_id' => $employeeUniqueId,
                             'group_id' => $groupId,
                             'field_id' => $fieldId,
-                            'company_id' => $companyId,
-                            'deleted' => 0,
-                        ])
-                        ->first();
+                            'company_id' => $companyId
+                        ]
+                    )->fetch('assoc');
+                    
+                    $existingFile = $existingFileResult ? (object)$existingFileResult : null;
+
+                    // Generate unique filename using the same convention as Skiltrakker
+                    $fileExtension = pathinfo($fileName, PATHINFO_EXTENSION);
+                    $baseFileName = pathinfo($fileName, PATHINFO_FILENAME);
+                    $microtime = microtime(true);
+                    $randomSuffix = mt_rand(1000, 9999);
+                    $uniqueFileName = $baseFileName . '_' . number_format($microtime, 4, '', '') . '_' . $randomSuffix . '.' . $fileExtension;
+
+                    // Read file content from uploaded file
+                    $fileStream = $file->getStream();
+                    $fileContent = $fileStream->getContents();
+                    
+                    if ($fileContent === false) {
+                        throw new Exception("Failed to read file content for {$fieldId}.");
+                    }
+
+                    // Upload to S3 with proper folder structure: scorecardtrakker/employees/{companyId}/{employeeUniqueId}/{fieldId}/{filename}
+                    $s3Result = $s3Service->uploadFile(
+                        $fileContent,
+                        $uniqueFileName,
+                        $companyId,
+                        'employees',
+                        null, // companyName - not needed
+                        null, // employeeName - not needed
+                        null, // No intervention unique ID for employee files
+                        null, // No competency name for employee files
+                        null, // No level name for employee files
+                        $employeeUniqueId, // employeeUniqueId - required for folder structure
+                        $fieldId // fieldId - required for folder structure
+                    );
+
+                    if (!$s3Result['success']) {
+                        throw new Exception("Failed to upload file to S3 for {$fieldId}: " . ($s3Result['error'] ?? 'Unknown error'));
+                    }
 
                     if ($existingFile) {
-                        // Delete old file from storage
-                        $oldFilePath = WWW_ROOT . $existingFile->file_path;
-                        if (file_exists($oldFilePath)) {
-                            unlink($oldFilePath);
+                        // Delete old file from S3 if it exists
+                        if (!empty($existingFile->s3_bucket) && !empty($existingFile->s3_key)) {
+                            $s3Service->deleteFile($existingFile->s3_bucket, $existingFile->s3_key);
                         }
-                        // Update existing file record
-                        $existingFile->file_name = $fileName;
-                        $existingFile->file_path = 'Uploads/' . $file_name;
-                        $existingFile->file_type = $file->getClientMediaType();
-                        $existingFile->file_size = $file->getSize();
-                        $existingFile->modified = date('Y-m-d H:i:s');
-                        if (!$EmployeeAnswerFilesTable->save($existingFile)) {
+                        // Update existing file record using direct SQL
+                        // Note: deleted is a boolean in PostgreSQL, so use false instead of 0
+                        $updateResult = $connection->execute(
+                            'UPDATE employee_answer_files SET 
+                                file_name = :file_name, 
+                                file_path = :file_path, 
+                                file_type = :file_type, 
+                                file_size = :file_size, 
+                                s3_bucket = :s3_bucket, 
+                                s3_key = :s3_key, 
+                                employee_unique_id = :employee_unique_id, 
+                                employee_id = :employee_id, 
+                                modified = NOW() 
+                            WHERE id = :id',
+                            [
+                                'file_name' => $fileName,
+                                'file_path' => $uniqueFileName,
+                                'file_type' => $file->getClientMediaType(),
+                                'file_size' => $file->getSize(),
+                                's3_bucket' => $s3Result['bucket'],
+                                's3_key' => $s3Result['key'],
+                                'employee_unique_id' => $employeeUniqueId,
+                                'employee_id' => $employeeId,
+                                'id' => $existingFile->id
+                            ]
+                        );
+                        
+                        if ($updateResult->rowCount() === 0) {
+                            // Clean up S3 file if database save failed
+                            $s3Service->deleteFile($s3Result['bucket'], $s3Result['key']);
                             throw new Exception("Failed to update file metadata for {$fieldId}.");
                         }
                     } else {
-                        // Create new file record
-                        $fileEntity = $EmployeeAnswerFilesTable->newEntity([
-                            'answer_id' => $answerId,
-                            'file_name' => $fileName,
-                            'file_path' => 'Uploads/' . $file_name,
-                            'file_type' => $file->getClientMediaType(),
-                            'file_size' => $file->getSize(),
-                            'group_id' => $groupId,
-                            'field_id' => $fieldId,
-                            'company_id' => $companyId,
-                            'deleted' => 0,
-                            'created' => date('Y-m-d H:i:s'),
-                            'modified' => date('Y-m-d H:i:s'),
-                        ]);
-                        if (!$EmployeeAnswerFilesTable->save($fileEntity)) {
+                        // Create new file record using direct SQL
+                        // Note: deleted is a boolean in PostgreSQL, so use false instead of 0
+                        $insertResult = $connection->execute(
+                            'INSERT INTO employee_answer_files (answer_id, employee_id, employee_unique_id, file_name, file_path, file_type, file_size, group_id, field_id, company_id, s3_bucket, s3_key, deleted, created, modified) 
+                             VALUES (:answer_id, :employee_id, :employee_unique_id, :file_name, :file_path, :file_type, :file_size, :group_id, :field_id, :company_id, :s3_bucket, :s3_key, false, NOW(), NOW())',
+                            [
+                                'answer_id' => $answerId,
+                                'employee_id' => $employeeId,
+                                'employee_unique_id' => $employeeUniqueId,
+                                'file_name' => $fileName,
+                                'file_path' => $uniqueFileName,
+                                'file_type' => $file->getClientMediaType(),
+                                'file_size' => $file->getSize(),
+                                'group_id' => $groupId,
+                                'field_id' => $fieldId,
+                                'company_id' => $companyId,
+                                's3_bucket' => $s3Result['bucket'],
+                                's3_key' => $s3Result['key']
+                            ]
+                        );
+                        
+                        if ($insertResult->rowCount() === 0) {
+                            // Clean up S3 file if database save failed
+                            $s3Service->deleteFile($s3Result['bucket'], $s3Result['key']);
                             throw new Exception("Failed to save file metadata for {$fieldId}.");
                         }
                     }
@@ -3594,7 +3870,8 @@ class EmployeesController extends ApiController
                     if (!isset($fileMap[$groupId])) {
                         $fileMap[$groupId] = [];
                     }
-                    $fileMap[$groupId][$fieldId] = 'Uploads/' . $file_name;
+                    // Store unique filename in fileMap (not full path)
+                    $fileMap[$groupId][$fieldId] = $uniqueFileName;
                     $uploadedFields[] = "{$groupId}_{$fieldId}";
                 }
             }
@@ -3614,20 +3891,41 @@ class EmployeesController extends ApiController
                 }
             }
 
-            // Update answers with new file paths
-            $answerData = $answer->answers;
+            // Update answers with new file identifiers (unique filenames)
+            // Ensure answers is an array (handle JSONB/JSON type)
+            $answerData = is_array($answer->answers) ? $answer->answers : (is_string($answer->answers) ? json_decode($answer->answers, true) : []);
+            
+            if (!is_array($answerData)) {
+                $answerData = [];
+            }
+            
             foreach ($fileMap as $groupId => $fields) {
-                foreach ($fields as $fieldId => $filePath) {
+                foreach ($fields as $fieldId => $uniqueFileName) {
                     if (!isset($answerData[$groupId])) {
                         $answerData[$groupId] = [];
                     }
-                    $answerData[$groupId][$fieldId] = $filePath;
+                    // Store unique filename as identifier (frontend will use API endpoints or presigned URLs)
+                    $answerData[$groupId][$fieldId] = $uniqueFileName;
                 }
             }
-            $answer->answers = $answerData;
-            $answer->modified = date('Y-m-d H:i:s');
-            if (!$EmployeeTemplateAnswersTable->save($answer)) {
-                throw new Exception('Failed to update employee answers with file paths.');
+            
+            // Use direct SQL update to avoid schema description issues
+            // This bypasses CakePHP's entity save which requires schema description
+            // Note: deleted is a boolean in PostgreSQL, so use false instead of 0
+            $answersJson = json_encode($answerData, JSON_UNESCAPED_UNICODE);
+            
+            $updateResult = $connection->execute(
+                'UPDATE employee_template_answers SET answers = :answers::jsonb, modified = NOW() WHERE id = :id AND company_id = :company_id AND employee_unique_id = :employee_unique_id AND deleted = false',
+                [
+                    'answers' => $answersJson,
+                    'id' => $answerId,
+                    'company_id' => $companyId,
+                    'employee_unique_id' => $employeeUniqueId
+                ]
+            );
+            
+            if ($updateResult->rowCount() === 0) {
+                throw new Exception('Failed to update employee answers with file paths. No rows updated.');
             }
 
             // Commit transaction
@@ -6503,13 +6801,26 @@ class EmployeesController extends ApiController
             
             // Create, update, or restore role level
             if ($isUpdate) {
+                // Check if data actually changed before counting as update
+                $existingCustomFields = is_string($existing->custom_fields) 
+                    ? json_decode($existing->custom_fields, true) 
+                    : $existing->custom_fields;
+                $customFieldsChanged = json_encode($existingCustomFields) !== json_encode($customFields);
+                $nameChanged = $existing->name !== $roleLevel['name'];
+                $rankChanged = $existing->rank != $roleLevel['rank'];
+                
+                $hasChanges = $nameChanged || $rankChanged || $customFieldsChanged;
+                
                 // Update existing role level
                 $existing->name = $roleLevel['name'];
                 $existing->rank = $roleLevel['rank'];
                 $existing->custom_fields = $customFields;
                 $existing->modified = date('Y-m-d H:i:s');
                 if ($RoleLevelsTable->save($existing)) {
-                    $updatedCount++;
+                    // Only count as updated if data actually changed
+                    if ($hasChanges) {
+                        $updatedCount++;
+                    }
                 }
             } elseif ($isRestore) {
                 // Restore soft-deleted role level
@@ -6626,11 +6937,20 @@ class EmployeesController extends ApiController
             $mappedAnswers = $this->mapFieldValuesByLabel($orgtrakkerAnswers, $orgtrakkerTemplateStructure, $scorecardtrakkerTemplateStructure);
             
             if ($existing) {
+                // Check if data actually changed before counting as update
+                $existingAnswers = is_string($existing->answers) 
+                    ? json_decode($existing->answers, true) 
+                    : $existing->answers;
+                $answersChanged = json_encode($existingAnswers) !== json_encode($mappedAnswers);
+                
                 // Update existing job role
                 $existing->answers = $mappedAnswers;
                 $existing->modified = date('Y-m-d H:i:s');
                 if ($JobRoleTemplateAnswersTable->save($existing)) {
-                    $updatedCount++;
+                    // Only count as updated if data actually changed
+                    if ($answersChanged) {
+                        $updatedCount++;
+                    }
                 }
             } elseif ($isRestore) {
                 // Restore soft-deleted job role
@@ -7001,6 +7321,15 @@ class EmployeesController extends ApiController
                     $importedCount++;
                 }
             } elseif ($isUpdate) {
+                // Check if data actually changed before counting as update
+                $existingAnswers = is_string($existingEmployee->answers) 
+                    ? json_decode($existingEmployee->answers, true) 
+                    : $existingEmployee->answers;
+                $answersChanged = json_encode($existingAnswers) !== json_encode($mappedAnswers);
+                $reportToChanged = ($existingEmployee->report_to_employee_unique_id ?: null) !== ($reportToEmployeeUniqueId ?: null);
+                
+                $hasChanges = $answersChanged || $reportToChanged;
+                
                 // Update existing employee
                 $entity = $EmployeeTemplateAnswersTable->get($existingEmployee->id);
                 $entity->answers = $mappedAnswers;
@@ -7008,7 +7337,10 @@ class EmployeesController extends ApiController
                 $entity->modified = date('Y-m-d H:i:s');
                 
                 if ($EmployeeTemplateAnswersTable->save($entity)) {
-                    $updatedCount++;
+                    // Only count as updated if data actually changed
+                    if ($hasChanges) {
+                        $updatedCount++;
+                    }
                 }
             } else {
                 // Create new employee
@@ -7208,8 +7540,20 @@ class EmployeesController extends ApiController
             $existingRelationship = $existingRelationshipsMap[$employeeUniqueId] ?? null;
             
             if ($existingRelationship) {
-                // Update if report_to_employee_unique_id changed
-                if ($existingRelationship->report_to_employee_unique_id !== $reportToEmployeeUniqueId) {
+                // Check if any data actually changed before counting as update
+                $reportToChanged = ($existingRelationship->report_to_employee_unique_id ?: null) !== ($reportToEmployeeUniqueId ?: null);
+                $employeeFirstNameChanged = ($existingRelationship->employee_first_name ?? '') !== ($relationship['employee_first_name'] ?? '');
+                $employeeLastNameChanged = ($existingRelationship->employee_last_name ?? '') !== ($relationship['employee_last_name'] ?? '');
+                $managerFirstNameChanged = ($existingRelationship->reporting_manager_first_name ?: null) !== ($relationship['reporting_manager_first_name'] ?: null);
+                $managerLastNameChanged = ($existingRelationship->reporting_manager_last_name ?: null) !== ($relationship['reporting_manager_last_name'] ?: null);
+                $startDateChanged = ($existingRelationship->start_date ?: null) !== ($relationship['start_date'] ?: null);
+                $endDateChanged = ($existingRelationship->end_date ?: null) !== ($relationship['end_date'] ?: null);
+                
+                $hasChanges = $reportToChanged || $employeeFirstNameChanged || $employeeLastNameChanged || 
+                              $managerFirstNameChanged || $managerLastNameChanged || $startDateChanged || $endDateChanged;
+                
+                // Update if any field changed
+                if ($hasChanges) {
                     $existingRelationship->report_to_employee_unique_id = $reportToEmployeeUniqueId ?: null;
                     $existingRelationship->employee_first_name = $relationship['employee_first_name'] ?? '';
                     $existingRelationship->employee_last_name = $relationship['employee_last_name'] ?? '';
@@ -7219,21 +7563,24 @@ class EmployeesController extends ApiController
                     $existingRelationship->end_date = $relationship['end_date'] ?? null;
                     $existingRelationship->modified = date('Y-m-d H:i:s');
                     if ($EmployeeReportingRelationshipsTable->save($existingRelationship)) {
+                        // Only count as updated if data actually changed
                         $updatedCount++;
                         
-                        // Also update report_to_employee_unique_id in employee_template_answers
-                        $employee = $EmployeeTemplateAnswersTable->find()
-                            ->where([
-                                'company_id' => $companyId,
-                                'employee_unique_id' => $employeeUniqueId,
-                                'deleted' => false,
-                            ])
-                            ->first();
-                        
-                        if ($employee) {
-                            $employee->report_to_employee_unique_id = $reportToEmployeeUniqueId ?: null;
-                            $employee->modified = date('Y-m-d H:i:s');
-                            $EmployeeTemplateAnswersTable->save($employee);
+                        // Also update report_to_employee_unique_id in employee_template_answers if it changed
+                        if ($reportToChanged) {
+                            $employee = $EmployeeTemplateAnswersTable->find()
+                                ->where([
+                                    'company_id' => $companyId,
+                                    'employee_unique_id' => $employeeUniqueId,
+                                    'deleted' => false,
+                                ])
+                                ->first();
+                            
+                            if ($employee) {
+                                $employee->report_to_employee_unique_id = $reportToEmployeeUniqueId ?: null;
+                                $employee->modified = date('Y-m-d H:i:s');
+                                $EmployeeTemplateAnswersTable->save($employee);
+                            }
                         }
                     }
                 }

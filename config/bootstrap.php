@@ -95,6 +95,13 @@ if (file_exists(CONFIG . 'app_local.php')) {
 }
 
 /*
+ * Load AWS configuration for S3 file storage
+ */
+if (file_exists(CONFIG . 'aws.php')) {
+    Configure::load('aws', 'default');
+}
+
+/*
  * When debug = true the metadata cache should only last for a short time.
  */
 if (Configure::read('debug')) {
