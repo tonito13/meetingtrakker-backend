@@ -11,10 +11,17 @@ use Cake\ORM\Entity;
  *
  * @property int $id
  * @property int $answer_id
+ * @property int $company_id
+ * @property string $group_id
+ * @property string $field_id
  * @property string $file_name
  * @property string $file_path
  * @property string $file_type
  * @property int $file_size
+ * @property string|null $s3_bucket
+ * @property string|null $s3_key
+ * @property string|null $employee_unique_id
+ * @property int|null $employee_id
  * @property bool|null $deleted
  * @property \Cake\I18n\DateTime|null $created
  * @property \Cake\I18n\DateTime|null $modified
@@ -34,13 +41,17 @@ class EmployeeAnswerFile extends Entity
      */
     protected array $_accessible = [
         'answer_id' => true,
+        'company_id' => true,
+        'group_id' => true,
+        'field_id' => true,
         'file_name' => true,
         'file_path' => true,
         'file_type' => true,
         'file_size' => true,
-        'group_id' => true,
-        'field_id' => true,
-        'company_id' => true,
+        's3_bucket' => true,
+        's3_key' => true,
+        'employee_unique_id' => true,
+        'employee_id' => true,
         'deleted' => true,
         'created' => true,
         'modified' => true,
