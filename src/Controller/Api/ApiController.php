@@ -113,7 +113,7 @@ class ApiController extends Controller
                         $mappedCompanyId = $mappingService->getMappedCompanyIdForUser(
                             (int)$userId,
                             $username,
-                            'scorecardtrakker'
+                            'meetingtrakker'
                         );
                         
                         if ($mappedCompanyId !== null) {
@@ -267,7 +267,7 @@ class ApiController extends Controller
             $systemUserRole = $user->system_user_role ?? null;
         }
 
-        // Check for company mapping for scorecardtrakker (only for regular users)
+        // Check for company mapping for meetingtrakker (only for regular users)
         $companyId = $user->company_id ?? null;
         
         // Handle both object and array formats
@@ -290,7 +290,7 @@ class ApiController extends Controller
                 $mappedCompanyId = $mappingService->getMappedCompanyIdForUser(
                     (int)$userId,
                     $username,
-                    'scorecardtrakker'
+                    'meetingtrakker'
                 );
             if ($mappedCompanyId !== null) {
                 $companyId = $mappedCompanyId;
@@ -328,7 +328,7 @@ class ApiController extends Controller
             return $mappingService->getMappedCompanyIdForUser(
                 (int)$userId,
                 $username,
-                'scorecardtrakker'
+                'meetingtrakker'
             );
         } catch (\Exception $e) {
             // Log error but don't expose details - fail-safe fallback
@@ -339,7 +339,7 @@ class ApiController extends Controller
 
     /**
      * Normalize system user role for access control purposes
-     * Only "admin" and "user" are valid roles in scorecardtrakker.
+     * Only "admin" and "user" are valid roles in meetingtrakker.
      * Any other role (from other systems like orgtrakker) will be treated as "user".
      * The original role data remains unchanged in the database/token.
      * 

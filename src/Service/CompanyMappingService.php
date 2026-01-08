@@ -339,6 +339,74 @@ class CompanyMappingService
     }
 
     /**
+     * Get orgtrakker company ID from meetingtrakker company ID
+     *
+     * @param int $meetingtrakkerCompanyId MeetingTrakker company ID
+     * @return int|null Orgtrakker company ID or null if not found
+     */
+    public function getOrgtrakkerCompanyIdFromMeetingtrakker(int $meetingtrakkerCompanyId): ?int
+    {
+        try {
+            // Check if tables exist and are accessible
+            if (!isset($this->relationshipsTable) || !isset($this->companiesTable)) {
+                Log::warning('CompanyMappingService tables not initialized, returning null');
+                return null;
+            }
+
+            // Find relationship where meetingtrakker is the target
+            $relationship = $this->relationshipsTable->find()
+                ->where([
+                    'company_id_to' => $meetingtrakkerCompanyId,
+                    'relationship_type' => 'affiliate',
+                    'status' => 'active',
+                    'deleted' => false,
+                    'end_date IS' => null
+                ])
+                ->order(['is_primary' => 'DESC', 'start_date' => 'DESC'])
+                ->first();
+
+            if ($relationship) {
+                // Verify the source company exists in orgtrakker
+                $orgtrakkerCompany = $this->companiesTable->find()
+                    ->where([
+                        'company_id' => $relationship->company_id_from,
+                        'system_product_name' => 'orgtrakker',
+                        'deleted' => false
+                    ])
+                    ->first();
+
+                if ($orgtrakkerCompany) {
+                    return $relationship->company_id_from;
+                }
+            }
+
+            return null;
+        } catch (\Exception $e) {
+            Log::error('Error getting orgtrakker company ID from meetingtrakker: ' . $e->getMessage(), [
+                'meetingtrakker_company_id' => $meetingtrakkerCompanyId,
+                'trace' => $e->getTraceAsString()
+            ]);
+            return null;
+        }
+    }
+
+    /**
+     * Get meetingtrakker company ID from orgtrakker company ID
+     *
+     * @param int $orgtrakkerCompanyId Orgtrakker company ID
+     * @return int|null MeetingTrakker company ID or null if not found
+     */
+    public function getMeetingtrakkerCompanyId(int $orgtrakkerCompanyId): ?int
+    {
+        return $this->getMappedCompanyId(
+            $orgtrakkerCompanyId,
+            'orgtrakker',
+            'meetingtrakker',
+            'affiliate'
+        );
+    }
+
+    /**
      * Get mapped company ID for a user
      *
      * @param int $userId User ID

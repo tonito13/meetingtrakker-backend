@@ -93,8 +93,12 @@ class UsersController extends ApiController
                 ->withStringBody(json_encode(['message' => 'Invalid username or password']));
         }
 
-        // Check for company mapping for scorecardtrakker
-        $mappedCompanyId = $this->getMappedCompanyId($user->id, $user->username, 'scorecardtrakker');
+        // NOTE: We are NOT checking for employee records in employee_template_answers table.
+        // Users can log in with just their user record in the central workmatica database.
+        // This is a temporary change - employee record requirement has been removed.
+
+        // Check for company mapping for meetingtrakker
+        $mappedCompanyId = $this->getMappedCompanyId($user->id, $user->username, 'meetingtrakker');
         $effectiveCompanyId = $mappedCompanyId ?? $user->company_id;
 
         // Override user's company_id with mapped company_id if mapping exists
@@ -164,10 +168,10 @@ class UsersController extends ApiController
      * 
      * @param int $userId User ID
      * @param string $username Username
-     * @param string $systemType System type (default: 'scorecardtrakker')
+     * @param string $systemType System type (default: 'meetingtrakker')
      * @return int|null Mapped company ID if mapping exists and is active, null otherwise
      */
-    private function getMappedCompanyId($userId, $username, $systemType = 'scorecardtrakker')
+    private function getMappedCompanyId($userId, $username, $systemType = 'meetingtrakker')
     {
         try {
             // Get UserCompanyMappings table from default database (workmatica)

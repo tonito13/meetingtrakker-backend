@@ -83,7 +83,7 @@ class UserCompanyMappingsTable extends Table
             ->maxLength('system_type', 50)
             ->requirePresence('system_type', 'create')
             ->notEmptyString('system_type')
-            ->inList('system_type', ['orgtrakker', 'scorecardtrakker', 'skiltrakker', 'tickettrakker']);
+            ->inList('system_type', ['orgtrakker', 'scorecardtrakker', 'skiltrakker', 'tickettrakker', 'meetingtrakker']);
 
         $validator
             ->boolean('active')

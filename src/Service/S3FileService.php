@@ -9,7 +9,7 @@ use Cake\Core\Configure;
 use Cake\Log\Log;
 
 /**
- * S3 File Service for ScorecardTrakker Application
+ * S3 File Service for MeetingTrakker Application
  * 
  * Handles all file operations with AWS S3 including:
  * - File uploads with company isolation using company ID folders
@@ -111,31 +111,31 @@ class S3FileService
         string $moduleUniqueId = null
     ): array {
         try {
-            // Build the S3 key with scorecardtrakker prefix using company ID directly
+            // Build the S3 key with meetingtrakker prefix using company ID directly
             if ($folderType === 'employees' && $employeeUniqueId && $fieldId) {
-                // For employees: scorecardtrakker/employees/{companyId}/{employeeUniqueId}/{fieldId}/{filename}
-                $key = 'scorecardtrakker/' . $this->folders[$folderType] . $companyId . '/' . $employeeUniqueId . '/' . $fieldId . '/' . $fileName;
+                // For employees: meetingtrakker/employees/{companyId}/{employeeUniqueId}/{fieldId}/{filename}
+                $key = 'meetingtrakker/' . $this->folders[$folderType] . $companyId . '/' . $employeeUniqueId . '/' . $fieldId . '/' . $fileName;
             } elseif ($folderType === 'interventions' && $employeeUniqueId && $interventionUniqueId) {
-                // For interventions: scorecardtrakker/interventions/{companyId}/{employeeUniqueId}/{interventionUniqueId}/{filename}
-                $key = 'scorecardtrakker/' . $this->folders[$folderType] . $companyId . '/' . $employeeUniqueId . '/' . $interventionUniqueId . '/' . $fileName;
+                // For interventions: meetingtrakker/interventions/{companyId}/{employeeUniqueId}/{interventionUniqueId}/{filename}
+                $key = 'meetingtrakker/' . $this->folders[$folderType] . $companyId . '/' . $employeeUniqueId . '/' . $interventionUniqueId . '/' . $fileName;
             } elseif ($folderType === 'rubrics' && $competencyUniqueId && $levelUniqueId) {
-                // For rubrics: scorecardtrakker/rubrics/{companyId}/{competencyUniqueId}/{levelUniqueId}/{filename}
-                $key = 'scorecardtrakker/' . $this->folders[$folderType] . $companyId . '/' . $competencyUniqueId . '/' . $levelUniqueId . '/' . $fileName;
+                // For rubrics: meetingtrakker/rubrics/{companyId}/{competencyUniqueId}/{levelUniqueId}/{filename}
+                $key = 'meetingtrakker/' . $this->folders[$folderType] . $companyId . '/' . $competencyUniqueId . '/' . $levelUniqueId . '/' . $fileName;
             } elseif ($folderType === 'training_courses' && $courseUniqueId && $moduleUniqueId) {
-                // For training courses: scorecardtrakker/training_courses/{companyId}/{courseUniqueId}/{moduleUniqueId}/{filename}
-                $key = 'scorecardtrakker/' . $this->folders[$folderType] . $companyId . '/' . $courseUniqueId . '/' . $moduleUniqueId . '/' . $fileName;
+                // For training courses: meetingtrakker/training_courses/{companyId}/{courseUniqueId}/{moduleUniqueId}/{filename}
+                $key = 'meetingtrakker/' . $this->folders[$folderType] . $companyId . '/' . $courseUniqueId . '/' . $moduleUniqueId . '/' . $fileName;
             } elseif ($folderType === 'tests' && $interventionUniqueId) {
-                // For tests: scorecardtrakker/tests/{companyId}/{examinationUniqueId}/{filename}
-                $key = 'scorecardtrakker/' . $this->folders[$folderType] . $companyId . '/' . $interventionUniqueId . '/' . $fileName;
+                // For tests: meetingtrakker/tests/{companyId}/{examinationUniqueId}/{filename}
+                $key = 'meetingtrakker/' . $this->folders[$folderType] . $companyId . '/' . $interventionUniqueId . '/' . $fileName;
             } elseif ($folderType === 'questions' && $interventionUniqueId) {
-                // For questions: scorecardtrakker/tests/questions/{companyId}/{testId}/{filename}
-                $key = 'scorecardtrakker/tests/questions/' . $companyId . '/' . $interventionUniqueId . '/' . $fileName;
+                // For questions: meetingtrakker/tests/questions/{companyId}/{testId}/{filename}
+                $key = 'meetingtrakker/tests/questions/' . $companyId . '/' . $interventionUniqueId . '/' . $fileName;
             } elseif ($folderType === 'answers' && $interventionUniqueId) {
-                // For answers: scorecardtrakker/tests/answers/{companyId}/{assignmentId}/{filename}
-                $key = 'scorecardtrakker/tests/answers/' . $companyId . '/' . $interventionUniqueId . '/' . $fileName;
+                // For answers: meetingtrakker/tests/answers/{companyId}/{assignmentId}/{filename}
+                $key = 'meetingtrakker/tests/answers/' . $companyId . '/' . $interventionUniqueId . '/' . $fileName;
             } else {
-                // For other types: scorecardtrakker/{folderType}/{companyId}/{filename}
-                $key = 'scorecardtrakker/' . $this->folders[$folderType] . $companyId . '/' . $fileName;
+                // For other types: meetingtrakker/{folderType}/{companyId}/{filename}
+                $key = 'meetingtrakker/' . $this->folders[$folderType] . $companyId . '/' . $fileName;
             }
             
             // Debug logging
@@ -156,7 +156,7 @@ class S3FileService
                 'ServerSideEncryption' => $this->settings['ServerSideEncryption'],
                 'Metadata' => [
                     'original-name' => $fileName,
-                    'uploaded-by' => 'scorecardtrakker',
+                    'uploaded-by' => 'meetingtrakker',
                     'company-id' => (string)$companyId
                 ]
             ]);

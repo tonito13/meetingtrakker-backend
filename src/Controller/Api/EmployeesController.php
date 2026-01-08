@@ -563,7 +563,7 @@ class EmployeesController extends ApiController
                         throw new Exception("Failed to read file content for {$fieldId}.");
                     }
 
-                    // Upload to S3 with proper folder structure: scorecardtrakker/employees/{companyId}/{employeeUniqueId}/{fieldId}/{filename}
+                    // Upload to S3 with proper folder structure: meetingtrakker/employees/{companyId}/{employeeUniqueId}/{fieldId}/{filename}
                     $s3Result = $s3Service->uploadFile(
                         $fileContent,
                         $uniqueFileName,
@@ -3573,7 +3573,7 @@ class EmployeesController extends ApiController
     {
         $UsersTable = $this->getTable('Users');
 
-        // First, try to find the user with the scorecardtrakker company ID (for native employees)
+        // First, try to find the user with the meetingtrakker company ID (for native employees)
         $user = $UsersTable
             ->find()
             ->where([
@@ -3587,7 +3587,7 @@ class EmployeesController extends ApiController
         if (!$user) {
             try {
                 $mappingService = $this->getCompanyMappingService();
-                $orgtrakkerCompanyId = $mappingService->getOrgtrakkerCompanyIdFromScorecardtrakker((int)$companyId);
+                $orgtrakkerCompanyId = $mappingService->getOrgtrakkerCompanyIdFromMeetingtrakker((int)$companyId);
                 
                 if ($orgtrakkerCompanyId) {
                     $user = $UsersTable
@@ -3782,7 +3782,7 @@ class EmployeesController extends ApiController
                         throw new Exception("Failed to read file content for {$fieldId}.");
                     }
 
-                    // Upload to S3 with proper folder structure: scorecardtrakker/employees/{companyId}/{employeeUniqueId}/{fieldId}/{filename}
+                    // Upload to S3 with proper folder structure: meetingtrakker/employees/{companyId}/{employeeUniqueId}/{fieldId}/{filename}
                     $s3Result = $s3Service->uploadFile(
                         $fileContent,
                         $uniqueFileName,
@@ -4698,7 +4698,7 @@ class EmployeesController extends ApiController
                 $UsersTable = $this->getTable('Users', 'default');
                 
                 // Query by userId only (unique), not by company_id
-                // Users can have different company_ids (original orgtrakker company_id vs mapped scorecardtrakker company_id)
+                // Users can have different company_ids (original orgtrakker company_id vs mapped meetingtrakker company_id)
                 $user = $UsersTable->find()
                     ->where([
                         'id' => $userId,
@@ -4736,7 +4736,7 @@ class EmployeesController extends ApiController
     /**
      * Get orgtrakker database connection
      *
-     * @param string|int|null $companyId Current company ID (scorecardtrakker)
+     * @param string|int|null $companyId Current company ID (meetingtrakker)
      * @return \Cake\Database\Connection
      */
     private function getOrgtrakkerConnection(string|int|null $companyId = null)
@@ -4745,7 +4745,7 @@ class EmployeesController extends ApiController
         if ($companyId !== null) {
             try {
                 $mappingService = $this->getCompanyMappingService();
-                $orgtrakkerCompanyId = $mappingService->getOrgtrakkerCompanyIdFromScorecardtrakker((int)$companyId);
+                $orgtrakkerCompanyId = $mappingService->getOrgtrakkerCompanyIdFromMeetingtrakker((int)$companyId);
                 
                 if ($orgtrakkerCompanyId !== null) {
                     // Use mapped company ID for connection
@@ -4851,7 +4851,7 @@ class EmployeesController extends ApiController
         // Convert to string for consistency
         $companyIdStr = (string)$companyId;
         $mappingService = $this->getCompanyMappingService();
-        $orgtrakkerCompanyId = $mappingService->getOrgtrakkerCompanyIdFromScorecardtrakker((int)$companyId);
+        $orgtrakkerCompanyId = $mappingService->getOrgtrakkerCompanyIdFromMeetingtrakker((int)$companyId);
         
         if ($orgtrakkerCompanyId !== null) {
             return $orgtrakkerCompanyId;

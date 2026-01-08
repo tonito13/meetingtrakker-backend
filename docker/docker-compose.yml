@@ -1,19 +1,19 @@
 version: "3.8"
 
 services: 
-  scorecardtrakker_backend: 
-    container_name: scorecardtrakker_backend
+  meetingtrakker_backend: 
+    container_name: meetingtrakker_backend
     restart: always
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: scorecardtrakker_backend:latest
+    image: meetingtrakker_backend:latest
     environment: 
       - APACHE_RUN_USER=www-data
       - APACHE_RUN_GROUP=www-data
     ports:
-      - "8085:80"
-      - "8086:443"
+      - "8087:80"
+      - "8088:443"
     volumes:
       - ../:/var/www/html
     command: >
